@@ -1,0 +1,64 @@
+name: Build & Release Portable App
+
+on:
+  push:
+    tags:
+      - 'v*' # 只有當推播標籤 (例如 git tag v1.0.0) 時才會觸發打包與發布
+
+# 【關鍵點 1: 權限問題解決】
+# 預設的 GITHUB_TOKEN 可能只有讀取權限。
+# 必須明確賦予 'contents: write' 權限，electron-builder 才有權限建立 Github Release 並上傳檔案。
+permissions:
+  contents: write 
+
+jobs:
+  release:
+    # 既然是要打包 Windows .exe，建議直接跑在 windows 機器上，避免跨平台編譯 (Cross-compile) 可能遇到的原生模組黑魔法問題
+    runs-on: windows-latest 
+
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          # 暫時註解 cache: 'npm'，避免因為 repository 沒有 package-lock.json 而發生錯誤
+          # cache: 'npm'
+
+      # 【關鍵點 2: 版本衝突問題解決】
+      # 若您有將剛剛產生的 package-lock.json 丟上 GitHub，可以使用 npm ci。
+      # 但為避免初次部署找不到 lockfile 造成的錯誤，此處先改用 npm install 作為安全備案。
+      - name: Install Dependencies
+        run: npm install
+
+      # 前端 React/Vite 建置 (依照 electron-vite 的腳本設定)
+      - name: Build the React App
+        run: npm run build
+        
+      # 【關鍵點 3: electron-builder 發布設定】
+      - name: Compile & Publish Electron App
+        env:
+          # 將 Github 自動配置的 Token 傳遞入環境變數
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          DEBUG: electron-builder
+        # 指示 electron-builder 讀取 package.json 中 win.target 的設定
+        run: npx electron-builder --win --publish always
+
+      # 作為備案：將產生的免安裝檔案上傳為 Artifact (在 Action 頁面可以直接下載)
+      - name: Upload Artifacts as Fallback
+        uses: actions/upload-artifact@v4
+        with:
+          name: FileNexus-Portable-Zip
+          path: release/**/*.zip
+
+      # 【關鍵點 4: 強制上傳到 Github Release】
+      # 若 electron-builder 本身的上傳機制失效，我們會用這個 action 強制把打出來的 .zip 丟進該 tag 的 release 裡面
+      - name: Upload to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/**/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

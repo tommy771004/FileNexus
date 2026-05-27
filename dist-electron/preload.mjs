@@ -1,0 +1,1 @@
+"use strict";const t=require("electron");t.contextBridge.exposeInMainWorld("ipcRenderer",{on(...e){const[n,r]=e;return t.ipcRenderer.on(n,(c,...o)=>r(c,...o))},off(...e){const[n,...r]=e;return t.ipcRenderer.off(n,...r)},send(...e){const[n,...r]=e;return t.ipcRenderer.send(n,...r)},invoke(...e){const[n,...r]=e;return t.ipcRenderer.invoke(n,...r)}});
