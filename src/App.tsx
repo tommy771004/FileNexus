@@ -82,9 +82,10 @@ export default function App() {
           } else {
             const file = await readFileEntry(entry);
             // Overwrite the file path to maintain directory structure if possible
-            Object.defineProperty(file, 'webkitRelativePath', {
+            Object.defineProperty(file, 'customPath', {
               value: `${path}${file.name}`,
-              writable: false
+              writable: false,
+              enumerable: true
             });
             allFiles.push(file);
           }

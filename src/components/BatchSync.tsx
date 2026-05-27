@@ -172,21 +172,21 @@ export default function BatchSync() {
 
     // Filter out common ignored directories to avoid performance issues
     const filteredArray = fileArray.filter(f => {
-      const path = f.webkitRelativePath || f.name;
+      const path = (f as any).customPath || f.webkitRelativePath || f.name;
       const parts = path.split('/');
-      return !parts.some(p => p === 'node_modules' || p === '.git' || p === '.next' || p === 'dist' || p === 'build');
+      return !parts.some((p: string) => p === 'node_modules' || p === '.git' || p === '.next' || p === 'dist' || p === 'build');
     });
 
     if (filteredArray.length > 0) {
-      const firstPath = filteredArray[0].webkitRelativePath;
+      const firstPath = (filteredArray[0] as any).customPath || filteredArray[0].webkitRelativePath || filteredArray[0].name;
       if (firstPath && firstPath.includes('/')) {
         topLevelDir = firstPath.split('/')[0] + '/';
-        allShareTopLevel = filteredArray.every(f => f.webkitRelativePath.startsWith(topLevelDir));
+        allShareTopLevel = filteredArray.every(f => ((f as any).customPath || f.webkitRelativePath || f.name).startsWith(topLevelDir));
       }
     }
 
     const newFiles: FileItem[] = filteredArray.map((file, index) => {
-      let path = file.webkitRelativePath || file.name;
+      let path = (file as any).customPath || file.webkitRelativePath || file.name;
       if (allShareTopLevel && path.startsWith(topLevelDir)) {
         path = path.substring(topLevelDir.length);
       }
@@ -537,8 +537,9 @@ export default function BatchSync() {
 
   const cleanPath = (base: string, relative: string) => {
     let combined = base ? `${base}/${relative}` : relative;
-    // Remove duplicate slashes, leading slashes, and current directory ./ 
-    combined = combined.replace(/\/+/g, '/')
+    // Remove backslashes, duplicate slashes, leading slashes, and current directory ./ 
+    combined = combined.replace(/\\/g, '/')
+                       .replace(/\/+/g, '/')
                        .replace(/^\//, '')
                        .replace(/(^|\/)\.\//g, '$1');
     return combined;
@@ -613,22 +614,60 @@ export default function BatchSync() {
       let anyDiff = false;
       let diffCount = 0;
       
+      let bestStripPrefix = "";
+      // If the path does not exactly match and there's a common top-level directory (e.g. they dropped 'src' folder)
+      // we can try stripping the base folder from paths to see if it matches better.
+      if (files.length > 0) {
+        let commonPrefix = files[0].path;
+        for (const f of files) {
+          let i = 0;
+          while (i < commonPrefix.length && i < f.path.length && commonPrefix[i] === f.path[i]) { i++; }
+          commonPrefix = commonPrefix.substring(0, i);
+        }
+        
+        if (commonPrefix && commonPrefix.includes('/')) {
+           const prefixToTest = commonPrefix.substring(0, commonPrefix.lastIndexOf('/') + 1);
+           if (prefixToTest) {
+             let matchWithPrefix = 0;
+             let matchWithoutPrefix = 0;
+             for (const f of files.slice(0, 50)) {
+                let p1 = cleanPath(basePath, f.path);
+                if (p1.startsWith('/')) p1 = p1.substring(1);
+                if (treeMap.has(p1)) matchWithPrefix++;
+
+                let p2 = cleanPath(basePath, f.path.substring(prefixToTest.length));
+                if (p2.startsWith('/')) p2 = p2.substring(1);
+                if (treeMap.has(p2)) matchWithoutPrefix++;
+             }
+             if (matchWithoutPrefix > matchWithPrefix) {
+               Object.defineProperty(window, '_bestStripPrefix', { value: prefixToTest, writable: true, configurable: true });
+               bestStripPrefix = prefixToTest;
+               console.log(`[Diff] 發現更佳的路徑對應！自動移除共用前綴: '${prefixToTest}'`);
+             }
+           }
+        }
+      }
+
       const diffResults = await Promise.all(
         files.map(async (f) => {
-          let fPath = cleanPath(basePath, f.path);
+          let adjustedPath = f.path;
+          if (bestStripPrefix && adjustedPath.startsWith(bestStripPrefix)) {
+            adjustedPath = adjustedPath.substring(bestStripPrefix.length);
+          }
+          let fPath = cleanPath(basePath, adjustedPath);
           if (fPath.startsWith('/')) fPath = fPath.substring(1);
 
           console.log(`[Diff] Checking path: '${fPath}' (Original: '${f.path}', Base: '${basePath}')`);
           const ghSha = treeMap.get(fPath) as string;
           if (!ghSha) {
-            return { f, fPath, isDiff: true, diffStatus: 'new' as DiffStatus, localSha: null, ghSha: null };
+            return { f: bestStripPrefix ? { ...f, path: adjustedPath } : f, fPath, isDiff: true, diffStatus: 'new' as DiffStatus, localSha: null, ghSha: null };
           }
 
           try {
             const localShas = await computeGitSha(f.file);
             const isDiff = !localShas.includes(ghSha);
             return {
-              f,
+              f: bestStripPrefix ? { ...f, path: adjustedPath } : f,
               fPath,
               isDiff,
               diffStatus: (isDiff ? 'modified' : 'synced') as DiffStatus,
