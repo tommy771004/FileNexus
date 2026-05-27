@@ -1210,7 +1210,7 @@ export default function BatchSync() {
             {/* 
               @ts-ignore: webkitdirectory is standard in browsers but not formally in React TS types. 
             */}
-            <input type="file" webkitdirectory="" directory="" multiple className="hidden" ref={dirInputRef} onChange={handleFileSelect} />
+            <input type="file" {...({ webkitdirectory: "", directory: "" } as any)} multiple className="hidden" ref={dirInputRef} onChange={handleFileSelect} />
 
             {/* File List & Output Console container */}
             <div className="pt-4 pb-2 grid grid-cols-1 lg:grid-cols-2 gap-5 border-t border-slate-100 flex-1 min-h-0">
