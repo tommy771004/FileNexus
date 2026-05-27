@@ -10,6 +10,7 @@ import { generateBatchCommitMessage } from '../services/llmService';
 import { detectLanguage } from '../services/routingService';
 import { Editor } from '@monaco-editor/react';
 import { get, set } from 'idb-keyval';
+import { motion, AnimatePresence } from 'motion/react';
 
 interface FileItem {
   id: string;
@@ -120,13 +121,14 @@ export default function BatchSync() {
 
   const getLocalStatus = useCallback((path: string, file: File): 'modified' | 'synced' | 'unknown' => {
     if (!repoName || !repoName.includes('/')) return 'unknown';
-    const key = `${repoName}:${path}`;
+    const targetPath = cleanPath(basePath, path);
+    const key = `${repoName}:${targetPath}`;
     const state = fileSyncStates[key];
     if (!state) return 'unknown';
     
     const isModified = file.lastModified !== state.lastModified || file.size !== state.size;
     return isModified ? 'modified' : 'synced';
-  }, [repoName, fileSyncStates]);
+  }, [repoName, fileSyncStates, basePath]);
 
   const filteredFiles = useMemo(() => {
     return files.filter(f => {
@@ -539,8 +541,10 @@ export default function BatchSync() {
 
   const cleanPath = (base: string, relative: string) => {
     let combined = base ? `${base}/${relative}` : relative;
-    // Remove duplicate slashes and leading slashes
-    combined = combined.replace(/\/+/g, '/').replace(/^\//, '');
+    // Remove duplicate slashes, leading slashes, and current directory ./ 
+    combined = combined.replace(/\/+/g, '/')
+                       .replace(/^\//, '')
+                       .replace(/(^|\/)\.\//g, '$1');
     return combined;
   };
 
@@ -595,6 +599,7 @@ export default function BatchSync() {
         const ghSha = treeMap.get(fPath);
         if (!ghSha) {
           // File not in github, so it's different (new)
+          console.debug(`[Diff] NEW file detected. Workspace: ${f.path} -> Repo: ${fPath}`);
           newDiffs[f.path] = true;
           anyDiff = true;
           diffCount++;
@@ -604,6 +609,7 @@ export default function BatchSync() {
           const isDiff = localSha !== ghSha;
           newDiffs[f.path] = isDiff;
           if (isDiff) {
+             console.debug(`[Diff] MODIFIED file restricted. Workspace: ${f.path} -> Repo: ${fPath} | Local SHA: ${localSha} | Remote SHA: ${ghSha}`);
              anyDiff = true;
              diffCount++;
              delete newSyncStates[`${repoName}:${fPath}`];
@@ -1564,9 +1570,20 @@ export default function BatchSync() {
       </div>
 
       {/* Floating Progress Capsule */}
-      {isProcessing && progress.total > 0 && (
-        <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-50 bg-white/95 backdrop-blur-md border border-slate-200 shadow-[0_8px_30px_rgb(0,0,0,0.12)] rounded-2xl overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.23,1,0.32,1)] hover:scale-[1.02] hover:shadow-lg ${isProgressCollapsed ? 'w-48' : 'w-[400px] max-w-[90vw]'}`}>
-          <div className="p-4 flex items-center justify-between cursor-pointer group focus:outline-none" tabIndex={0} onKeyDown={(e) => { if(e.key==='Enter'||e.key===' ') setIsProgressCollapsed(!isProgressCollapsed) }} onClick={() => setIsProgressCollapsed(!isProgressCollapsed)} aria-label={isProgressCollapsed ? "Expand progress view" : "Collapse progress view"}>
+      <AnimatePresence>
+        {isProcessing && progress.total > 0 && (
+          <motion.div 
+            initial={{ opacity: 0, y: 40, x: "-50%" }}
+            animate={{ opacity: 1, y: 0, x: "-50%" }}
+            exit={{ opacity: 0, y: 40, x: "-50%" }}
+            whileHover={{ scale: 1.02 }}
+            transition={{ 
+              type: "spring", stiffness: 300, damping: 25,
+              scale: { duration: 0.5, ease: [0.23, 1, 0.32, 1] }
+            }}
+            className={`fixed bottom-8 left-1/2 origin-bottom z-50 bg-[rgba(255,255,255,0.98)] backdrop-blur-md border border-slate-200 shadow-[0_8px_30px_rgb(0,0,0,0.12)] hover:shadow-xl rounded-2xl overflow-hidden transition-shadow duration-500 ${isProgressCollapsed ? 'w-48' : 'w-[400px] max-w-[calc(100vw-2rem)]'}`}
+          >
+            <div className="p-4 flex items-center justify-between cursor-pointer group focus:outline-none" tabIndex={0} onKeyDown={(e) => { if(e.key==='Enter'||e.key===' ') setIsProgressCollapsed(!isProgressCollapsed) }} onClick={() => setIsProgressCollapsed(!isProgressCollapsed)} aria-label={isProgressCollapsed ? "Expand progress view" : "Collapse progress view"}>
             <div className="flex items-center space-x-3 overflow-hidden">
               <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-700 shrink-0">
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -1580,13 +1597,13 @@ export default function BatchSync() {
                   {Math.round((progress.current / progress.total) * 100)}% ({progress.current}/{progress.total})
                 </span>
                 {!isProgressCollapsed && (
-                  <span className="text-xs font-medium text-slate-600 truncate mt-0.5">
+                  <span className="text-xs font-medium text-slate-700 truncate mt-0.5">
                     正在同步: {currentSyncingFile || '系統處理中...'}
                   </span>
                 )}
               </div>
             </div>
-            <button className="text-slate-500 group-hover:text-slate-800 transition-colors shrink-0 p-1 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-md" aria-label={isProgressCollapsed ? 'Expand' : 'Collapse'}>
+            <button className="text-slate-600 group-hover:text-slate-900 transition-colors shrink-0 p-1 focus:outline-none focus:ring-2 focus:ring-blue-600 rounded-md" aria-label={isProgressCollapsed ? 'Expand' : 'Collapse'}>
                {isProgressCollapsed ? <Maximize className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
             </button>
           </div>
@@ -1600,8 +1617,9 @@ export default function BatchSync() {
               </div>
             </div>
           )}
-        </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
