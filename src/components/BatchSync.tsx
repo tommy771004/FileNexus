@@ -559,20 +559,38 @@ export default function BatchSync() {
       return Array.from(new Uint8Array(hashBuffer)).map((b: number) => b.toString(16).padStart(2, '0')).join('');
     };
 
-    // Calculate for original format
+    // 1. Calculate for original format
     shas.push(await getHash(originalContent));
 
-    // Calculate for normalized LF (if text)
     try {
       const decoder = new TextDecoder('utf-8', { fatal: true });
-      const text = decoder.decode(originalContent);
-      if (!text.includes('\0') && text.includes('\r\n')) {
+      let text = decoder.decode(originalContent);
+      
+      // Remove UTF-8 BOM if present
+      if (text.charCodeAt(0) === 0xFEFF) {
+        text = text.slice(1);
+        const noBomContent = new TextEncoder().encode(text);
+        shas.push(await getHash(noBomContent));
+      }
+
+      // Check different line endings combos
+      if (!text.includes('\0')) {
+        // 2. LF normalized
         const lfText = text.replace(/\r\n/g, '\n');
-        const lfContent = new TextEncoder().encode(lfText);
-        shas.push(await getHash(lfContent));
+        if (lfText !== text) {
+          const lfContent = new TextEncoder().encode(lfText);
+          shas.push(await getHash(lfContent));
+        }
+
+        // 3. CRLF normalized (in case git has CRLF)
+        const crlfText = lfText.replace(/\n/g, '\r\n');
+        if (crlfText !== text) {
+          const crlfContent = new TextEncoder().encode(crlfText);
+          shas.push(await getHash(crlfContent));
+        }
       }
     } catch (e) {
-      // Decode failed, meaning it's a binary file or non-utf-8, leave as is.
+      // Decode failed (binary file), so we only rely on originalContent
     }
 
     return shas;
@@ -588,6 +606,7 @@ export default function BatchSync() {
     try {
       const tree = await getRepoTree(repoName, branch);
       const treeMap = new Map(tree.map((t: any) => [t.path, t.sha]));
+      console.log(`[Diff] Repo Tree keys sample:`, Array.from(treeMap.keys()).slice(0, 10));
       
       const newDiffs: Record<string, DiffStatus> = {};
       const newSyncStates: Record<string, { lastModified: number; size: number }> = { ...fileSyncStates };
@@ -599,6 +618,7 @@ export default function BatchSync() {
           let fPath = cleanPath(basePath, f.path);
           if (fPath.startsWith('/')) fPath = fPath.substring(1);
 
+          console.log(`[Diff] Checking path: '${fPath}' (Original: '${f.path}', Base: '${basePath}')`);
           const ghSha = treeMap.get(fPath) as string;
           if (!ghSha) {
             return { f, fPath, isDiff: true, diffStatus: 'new' as DiffStatus, localSha: null, ghSha: null };
