@@ -4,6 +4,7 @@ import { Files, Send, Loader2, FolderUp, FilePlus, CheckCircle2, XCircle, Clock,
   FileSearch, Trash2, Sparkles, RefreshCcw, HardDrive, Database, Music, Video, Archive,
   ChevronsDown, ChevronsUp, Maximize
 } from 'lucide-react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { syncMultipleFilesViaGitDatabase, getRepoTree } from '../services/githubService';
 import { storeService } from '../services/storeService';
 import { generateBatchCommitMessage } from '../services/llmService';
@@ -17,10 +18,12 @@ interface FileItem {
   file: File;
   path: string; // The relative path calculated including folder structure
   status: 'pending' | 'syncing' | 'success' | 'error';
-  localStatus: 'modified' | 'synced' | 'unknown';
+  localStatus: 'new' | 'modified' | 'synced' | 'unknown';
   errorMessage?: string;
   url?: string;
 }
+
+type DiffStatus = 'new' | 'modified' | 'synced' | 'unknown';
 
 interface TreeNode {
   name: string;
@@ -81,7 +84,7 @@ export default function BatchSync() {
   const [filterExtension, setFilterExtension] = useState('.js, .ts, .css, .html');
 
   const [useDiffFilter, setUseDiffFilter] = useState(false);
-  const [githubDiffStates, setGithubDiffStates] = useState<Record<string, boolean>>({});
+  const [githubDiffStates, setGithubDiffStates] = useState<Record<string, DiffStatus>>({});
   const [syncingRepo, setSyncingRepo] = useState(false);
 
   // Add state for name filtering
@@ -119,7 +122,10 @@ export default function BatchSync() {
     });
   }, []);
 
-  const getLocalStatus = useCallback((path: string, file: File): 'modified' | 'synced' | 'unknown' => {
+  const getLocalStatus = useCallback((path: string, file: File): 'new' | 'modified' | 'synced' | 'unknown' => {
+    const diffStatus = githubDiffStates[path];
+    if (diffStatus && diffStatus !== 'unknown') return diffStatus;
+
     if (!repoName || !repoName.includes('/')) return 'unknown';
     const targetPath = cleanPath(basePath, path);
     const key = `${repoName}:${targetPath}`;
@@ -128,7 +134,7 @@ export default function BatchSync() {
     
     const isModified = file.lastModified !== state.lastModified || file.size !== state.size;
     return isModified ? 'modified' : 'synced';
-  }, [repoName, fileSyncStates, basePath]);
+  }, [repoName, fileSyncStates, basePath, githubDiffStates]);
 
   const filteredFiles = useMemo(() => {
     return files.filter(f => {
@@ -153,51 +159,65 @@ export default function BatchSync() {
         }
       }
       if (useDiffFilter) {
-        if (!githubDiffStates[f.path]) keep = false;
+        const diffStatus = githubDiffStates[f.path];
+        if (!diffStatus || diffStatus === 'synced' || diffStatus === 'unknown') keep = false;
       }
       return keep;
     });
   }, [files, filterName, useDateFilter, filterDateTime, useExtFilter, filterExtension, useDiffFilter, githubDiffStates]);
 
+  const processFilesArray = useCallback((fileArray: File[], append = true, source = 'drag') => {
+    let topLevelDir = '';
+    let allShareTopLevel = false;
+
+    // Filter out common ignored directories to avoid performance issues
+    const filteredArray = fileArray.filter(f => {
+      const path = f.webkitRelativePath || f.name;
+      const parts = path.split('/');
+      return !parts.some(p => p === 'node_modules' || p === '.git' || p === '.next' || p === 'dist' || p === 'build');
+    });
+
+    if (filteredArray.length > 0) {
+      const firstPath = filteredArray[0].webkitRelativePath;
+      if (firstPath && firstPath.includes('/')) {
+        topLevelDir = firstPath.split('/')[0] + '/';
+        allShareTopLevel = filteredArray.every(f => f.webkitRelativePath.startsWith(topLevelDir));
+      }
+    }
+
+    const newFiles: FileItem[] = filteredArray.map((file, index) => {
+      let path = file.webkitRelativePath || file.name;
+      if (allShareTopLevel && path.startsWith(topLevelDir)) {
+        path = path.substring(topLevelDir.length);
+      }
+      return {
+        id: `${Date.now()}_${source}_${index}`,
+        file,
+        path: path || file.name,
+        status: 'pending',
+        localStatus: getLocalStatus(path || file.name, file)
+      };
+    });
+
+    setFiles(prev => append ? [...prev, ...newFiles] : newFiles);
+    
+    if (source === 'drag') {
+      window.dispatchEvent(new CustomEvent('global-toast', { 
+        detail: { message: `已匯入 ${newFiles.length} 個檔案至批次同步 (已略過 node_modules 等目錄)。` } 
+      }));
+    }
+  }, [getLocalStatus]);
+
   // Handle global batch drop
   useEffect(() => {
     const handleGlobalBatchDrop = (e: any) => {
       if (e.detail?.files && Array.isArray(e.detail.files)) {
-        let fileArray = e.detail.files as File[];
-        
-        let topLevelDir = '';
-        let allShareTopLevel = false;
-        if (fileArray.length > 0) {
-          const firstPath = fileArray[0].webkitRelativePath;
-          if (firstPath && firstPath.includes('/')) {
-            topLevelDir = firstPath.split('/')[0] + '/';
-            allShareTopLevel = fileArray.every(f => f.webkitRelativePath.startsWith(topLevelDir));
-          }
-        }
-
-        const newFiles: FileItem[] = fileArray.map((file, index) => {
-          let path = file.webkitRelativePath || file.name;
-          if (allShareTopLevel && path.startsWith(topLevelDir)) {
-            path = path.substring(topLevelDir.length);
-          }
-          return {
-            id: `${Date.now()}_drag_${index}`,
-            file,
-            path: path || file.name,
-            status: 'pending',
-            localStatus: getLocalStatus(path || file.name, file)
-          };
-        });
-        
-        setFiles(prev => [...prev, ...newFiles]);
-        window.dispatchEvent(new CustomEvent('global-toast', { 
-          detail: { message: `已匯入 ${newFiles.length} 個檔案至批次同步。` } 
-        }));
+        processFilesArray(e.detail.files as File[], true, 'drag');
       }
     };
     window.addEventListener('global-batch-drop', handleGlobalBatchDrop);
     return () => window.removeEventListener('global-batch-drop', handleGlobalBatchDrop);
-  }, [getLocalStatus]);
+  }, [processFilesArray]);
 
   // Load default repo from settings and sync states
   useEffect(() => {
@@ -216,34 +236,6 @@ export default function BatchSync() {
     loadDefaults();
   }, []);
 
-  const processFilesArray = useCallback((fileArray: File[], append = true) => {
-    let topLevelDir = '';
-    let allShareTopLevel = false;
-    if (fileArray.length > 0) {
-      const firstPath = fileArray[0].webkitRelativePath;
-      if (firstPath && firstPath.includes('/')) {
-        topLevelDir = firstPath.split('/')[0] + '/';
-        allShareTopLevel = fileArray.every(f => f.webkitRelativePath.startsWith(topLevelDir));
-      }
-    }
-
-    const newFiles: FileItem[] = fileArray.map((file, index) => {
-      let path = file.webkitRelativePath || file.name;
-      if (allShareTopLevel && path.startsWith(topLevelDir)) {
-        path = path.substring(topLevelDir.length);
-      }
-      return {
-        id: `${Date.now()}_${index}`,
-        file,
-        path: path || file.name,
-        status: 'pending',
-        localStatus: getLocalStatus(path || file.name, file)
-      };
-    });
-
-    setFiles(prev => append ? [...prev, ...newFiles] : newFiles);
-  }, [getLocalStatus]);
-
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
     const fileArray = Array.from(e.target.files) as File[];
@@ -255,6 +247,10 @@ export default function BatchSync() {
     const files: File[] = [];
     // @ts-ignore
     for await (const entry of dirHandle.values()) {
+        if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.next' || entry.name === 'dist' || entry.name === 'build') {
+            continue;
+        }
+
         if (entry.kind === 'file') {
             const file = await entry.getFile();
             Object.defineProperty(file, 'webkitRelativePath', {
@@ -548,31 +544,38 @@ export default function BatchSync() {
     return combined;
   };
 
-  const computeGitSha = async (file: File) => {
-    let buffer = await file.arrayBuffer();
-    let content = new Uint8Array(buffer);
-    
-    // Normalize CRLF to LF for text files, as git stores LF usually.
-    // Use fatal: true to ensure we only apply this to truly valid UTF-8 text files.
+  const computeGitSha = async (file: File): Promise<string[]> => {
+    const buffer = await file.arrayBuffer();
+    const originalContent = new Uint8Array(buffer);
+    const shas: string[] = [];
+
+    const getHash = async (content: Uint8Array) => {
+      const prefix = "blob " + content.length + "\0";
+      const prefixBuffer = new TextEncoder().encode(prefix);
+      const blobBuffer = new Uint8Array(prefixBuffer.length + content.length);
+      blobBuffer.set(prefixBuffer);
+      blobBuffer.set(content, prefixBuffer.length);
+      const hashBuffer = await crypto.subtle.digest('SHA-1', blobBuffer);
+      return Array.from(new Uint8Array(hashBuffer)).map((b: number) => b.toString(16).padStart(2, '0')).join('');
+    };
+
+    // Calculate for original format
+    shas.push(await getHash(originalContent));
+
+    // Calculate for normalized LF (if text)
     try {
       const decoder = new TextDecoder('utf-8', { fatal: true });
-      const text = decoder.decode(content);
-      // Ensure there are no null bytes (characteristic of binary files)
+      const text = decoder.decode(originalContent);
       if (!text.includes('\0') && text.includes('\r\n')) {
         const lfText = text.replace(/\r\n/g, '\n');
-        content = new TextEncoder().encode(lfText);
+        const lfContent = new TextEncoder().encode(lfText);
+        shas.push(await getHash(lfContent));
       }
     } catch (e) {
       // Decode failed, meaning it's a binary file or non-utf-8, leave as is.
     }
 
-    const prefix = "blob " + content.length + "\0";
-    const prefixBuffer = new TextEncoder().encode(prefix);
-    const blobBuffer = new Uint8Array(prefixBuffer.length + content.length);
-    blobBuffer.set(prefixBuffer);
-    blobBuffer.set(content, prefixBuffer.length);
-    const hashBuffer = await crypto.subtle.digest('SHA-1', blobBuffer);
-    return Array.from(new Uint8Array(hashBuffer)).map((b: number) => b.toString(16).padStart(2, '0')).join('');
+    return shas;
   };
 
   const handleSyncRepo = async () => {
@@ -586,36 +589,49 @@ export default function BatchSync() {
       const tree = await getRepoTree(repoName, branch);
       const treeMap = new Map(tree.map((t: any) => [t.path, t.sha]));
       
-      const newDiffs: Record<string, boolean> = {};
+      const newDiffs: Record<string, DiffStatus> = {};
       const newSyncStates: Record<string, { lastModified: number; size: number }> = { ...fileSyncStates };
       let anyDiff = false;
       let diffCount = 0;
       
-      for (const f of files) {
-        let fPath = cleanPath(basePath, f.path);
-        // Remove leading slash if any
-        if (fPath.startsWith('/')) fPath = fPath.substring(1);
-        
-        const ghSha = treeMap.get(fPath);
-        if (!ghSha) {
-          // File not in github, so it's different (new)
-          console.debug(`[Diff] NEW file detected. Workspace: ${f.path} -> Repo: ${fPath}`);
-          newDiffs[f.path] = true;
+      const diffResults = await Promise.all(
+        files.map(async (f) => {
+          let fPath = cleanPath(basePath, f.path);
+          if (fPath.startsWith('/')) fPath = fPath.substring(1);
+
+          const ghSha = treeMap.get(fPath) as string;
+          if (!ghSha) {
+            return { f, fPath, isDiff: true, diffStatus: 'new' as DiffStatus, localSha: null, ghSha: null };
+          }
+
+          try {
+            const localShas = await computeGitSha(f.file);
+            const isDiff = !localShas.includes(ghSha);
+            return {
+              f,
+              fPath,
+              isDiff,
+              diffStatus: (isDiff ? 'modified' : 'synced') as DiffStatus,
+              localSha: localShas[0],
+              ghSha
+            };
+          } catch (err) {
+            console.error(`Error computing SHA for ${f.path}`, err);
+            return { f, fPath, isDiff: true, diffStatus: 'modified' as DiffStatus, localSha: null, ghSha };
+          }
+        })
+      );
+
+      for (const result of diffResults) {
+        const { f, fPath, isDiff, diffStatus, localSha, ghSha } = result;
+        newDiffs[f.path] = diffStatus;
+        if (isDiff) {
+          console.debug(`[Diff] ${diffStatus.toUpperCase()} file detected. Workspace: ${f.path} -> Repo: ${fPath} | Local SHA: ${localSha} | Remote SHA: ${ghSha}`);
           anyDiff = true;
           diffCount++;
           delete newSyncStates[`${repoName}:${fPath}`];
         } else {
-          const localSha = await computeGitSha(f.file);
-          const isDiff = localSha !== ghSha;
-          newDiffs[f.path] = isDiff;
-          if (isDiff) {
-             console.debug(`[Diff] MODIFIED file restricted. Workspace: ${f.path} -> Repo: ${fPath} | Local SHA: ${localSha} | Remote SHA: ${ghSha}`);
-             anyDiff = true;
-             diffCount++;
-             delete newSyncStates[`${repoName}:${fPath}`];
-          } else {
-             newSyncStates[`${repoName}:${fPath}`] = { lastModified: f.file.lastModified, size: f.file.size };
-          }
+          newSyncStates[`${repoName}:${fPath}`] = { lastModified: f.file.lastModified, size: f.file.size };
         }
       }
       
@@ -961,7 +977,17 @@ export default function BatchSync() {
     clearDrag();
   };
 
-  const renderTree = (nodes: Record<string, TreeNode>, depth = 0, parentPath = '') => {
+  type FlatNode = {
+    id: string;
+    name: string;
+    depth: number;
+    type: 'folder' | 'file';
+    node: TreeNode;
+    parentPath: string;
+  };
+
+  const flattenTree = useCallback((nodes: Record<string, TreeNode>, depth = 0, parentPath = ''): FlatNode[] => {
+    const result: FlatNode[] = [];
     const orderArr = customOrder[parentPath];
     const sortedEntries = Object.entries(nodes).sort((a, b) => {
       if (orderArr) {
@@ -971,26 +997,61 @@ export default function BatchSync() {
         if (aIdx !== -1) return -1;
         if (bIdx !== -1) return 1;
       }
-      // Folders first, then files
       if (a[1].type !== b[1].type) return a[1].type === 'folder' ? -1 : 1;
       return a[0].localeCompare(b[0]);
     });
 
-    return sortedEntries.map(([name, node]) => {
-      const isExpanded = expandedFolders[node.path] !== false; // Default expanded
-      const hasChildren = Object.keys(node.children).length > 0;
-      
-      const isDragOver = dragOverItem?.path === node.path;
-      const dropPosition = dragOverItem?.position;
-      const dropClass = isDragOver ? (
-        dropPosition === 'inside' ? 'bg-blue-100/50 ring-2 ring-blue-400' :
-        dropPosition === 'before' ? 'border-t-2 border-t-blue-500' :
-        'border-b-2 border-b-blue-500'
-      ) : '';
+    for (const [name, node] of sortedEntries) {
+      const isExpanded = expandedFolders[node.path] !== false;
+      result.push({
+        id: node.type === 'file' ? node.fileItem!.id : node.path,
+        name,
+        depth,
+        type: node.type,
+        node,
+        parentPath
+      });
 
-      if (node.type === 'folder') {
-        return (
-          <div key={node.path} className="flex flex-col relative">
+      if (node.type === 'folder' && isExpanded) {
+        result.push(...flattenTree(node.children, depth + 1, node.path));
+      }
+    }
+    return result;
+  }, [customOrder, expandedFolders]);
+
+  const flattenedTree = useMemo(() => {
+    return flattenTree(fileTree);
+  }, [fileTree, flattenTree]);
+
+  const parentRef = useRef<HTMLDivElement>(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: flattenedTree.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: useCallback((index: number) => {
+      const item = flattenedTree[index];
+      return item.type === 'folder' ? 32 : 46;
+    }, [flattenedTree]),
+    overscan: 10,
+  });
+
+  const renderVirtualRow = (virtualRow: any) => {
+    const item = flattenedTree[virtualRow.index];
+    const { name, node, depth, parentPath } = item;
+    
+    const isDragOver = dragOverItem?.path === node.path;
+    const dropPosition = dragOverItem?.position;
+    const dropClass = isDragOver ? (
+      dropPosition === 'inside' ? 'bg-blue-100/50 ring-2 ring-blue-400' :
+      dropPosition === 'before' ? 'border-t-2 border-t-blue-500' :
+      'border-b-2 border-b-blue-500'
+    ) : '';
+
+    if (node.type === 'folder') {
+      const isExpanded = expandedFolders[node.path] !== false;
+      return (
+        <div key={virtualRow.key} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }}>
+          <div className="flex flex-col relative px-2">
             <div 
               draggable
               onDragStart={(e) => handleDragStart(e, { path: node.path, type: 'folder', parentPath, name })}
@@ -1015,104 +1076,116 @@ export default function BatchSync() {
               </div>
               <span className="text-xs font-bold text-slate-700 truncate select-none">{name}</span>
             </div>
-            {isExpanded && renderTree(node.children, depth + 1, node.path)}
-          </div>
-        );
-      }
-
-      const file = node.fileItem!;
-      const currentLocalStatus = getLocalStatus(file.path, file.file);
-      const isSelected = selectedFileIds.has(file.id);
-      
-      return (
-        <div 
-          key={file.id} 
-          draggable
-          onDragStart={(e) => handleDragStart(e, { path: node.path, type: 'file', parentPath, name })}
-          onDragOver={(e) => handleDragOver(e, { path: node.path, type: 'file', parentPath, name })}
-          onDrop={handleTreeDrop}
-          onDragEnd={clearDrag}
-          onClick={(e) => handleFileClick(e, file)}
-          className={`flex justify-between items-center py-1.5 px-3 hover:bg-white transition-all duration-200 group rounded-lg border cursor-pointer my-0.5 ${isSelected ? 'bg-white border-blue-200 shadow-sm ring-1 ring-blue-100' : 'border-transparent hover:border-slate-200/60'} ${dropClass}`}
-          style={{ marginLeft: `${depth * 12 + 20}px` }}
-        >
-          <div className="flex flex-col flex-1 min-w-0 pr-2">
-            <div className="flex items-center space-x-2.5">
-              <div className="relative shrink-0">
-                <FileIcon fileName={name} />
-                {currentLocalStatus === 'modified' && (
-                  <div className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-amber-500 ring-1 ring-white" />
-                )}
-              </div>
-              
-              <div className="flex items-center space-x-2 min-w-0">
-                <span className={`text-[13px] truncate leading-tight ${isSelected ? 'font-bold text-slate-900' : 'font-medium text-slate-700'}`} title={file.path}>
-                  {name}
-                </span>
-                
-                <div className="hidden sm:flex items-center space-x-1 shrink-0">
-                  {currentLocalStatus === 'modified' && (
-                    <span className="text-[10px] font-black text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/40">
-                      已修改
-                    </span>
-                  )}
-                  {currentLocalStatus === 'synced' && (
-                    <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200/40">
-                      已同步
-                    </span>
-                  )}
-                  {currentLocalStatus === 'unknown' && (
-                    <span className="text-[10px] font-black text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded border border-sky-200/40">
-                      全新檔案
-                    </span>
-                  )}
-                </div>
-              </div>
-            </div>
-            
-            {file.status === 'syncing' && (
-              <div className="w-full mt-1.5 flex items-center space-x-2 pl-6">
-                <div className="flex-1 h-1 bg-slate-100 rounded-full overflow-hidden relative">
-                  <div className="absolute top-0 left-0 h-full bg-blue-500 rounded-full w-1/3 animate-[pulse_1.5s_cubic-bezier(0.4,0,0.6,1)_infinite]" style={{ transform: 'translateX(100%)' }} />
-                </div>
-                <span className="text-[10px] text-blue-500 font-bold whitespace-nowrap">上傳中...</span>
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center space-x-2 shrink-0">
-            {file.status === 'syncing' ? (
-              <Loader2 className="w-3 h-3 text-blue-500 animate-spin" />
-            ) : file.status === 'success' ? (
-              <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-            ) : file.status === 'error' ? (
-              <div className="flex items-center space-x-1">
-                <XCircle className="w-3 h-3 text-red-500" />
-                <button 
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setFiles(prev => prev.map(f => f.id === file.id ? { ...f, status: 'pending', errorMessage: undefined } : f));
-                    setTimeout(() => handleBatchSync(), 100);
-                  }}
-                  className="p-1 hover:bg-red-50 rounded text-red-500 group/retry transition-colors"
-                >
-                  <RefreshCcw className="w-2.5 h-2.5 group-hover/retry:rotate-180 transition-transform duration-500" />
-                </button>
-              </div>
-            ) : null}
-            
-            <button
-              onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
-              disabled={isProcessing}
-              className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-0 p-1"
-            >
-              <Trash2 className="w-3 h-3" />
-            </button>
           </div>
         </div>
       );
-    });
+    }
+
+    const file = node.fileItem!;
+    const currentLocalStatus = getLocalStatus(file.path, file.file);
+    const isSelected = selectedFileIds.has(file.id);
+    
+    return (
+      <div key={virtualRow.key} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }}>
+        <div className="px-2 pb-0.5 pt-0.5">
+          <div 
+            draggable
+            onDragStart={(e) => handleDragStart(e, { path: node.path, type: 'file', parentPath, name })}
+            onDragOver={(e) => handleDragOver(e, { path: node.path, type: 'file', parentPath, name })}
+            onDrop={handleTreeDrop}
+            onDragEnd={clearDrag}
+            onClick={(e) => handleFileClick(e, file)}
+            className={`flex justify-between items-center py-1.5 px-3 hover:bg-white transition-all duration-200 group rounded-lg border cursor-pointer ${isSelected ? 'bg-white border-blue-200 shadow-sm ring-1 ring-blue-100' : 'border-transparent hover:border-slate-200/60'} ${dropClass}`}
+            style={{ marginLeft: `${depth * 12 + 20}px` }}
+          >
+            <div className="flex flex-col flex-1 min-w-0 pr-2">
+              <div className="flex items-center space-x-2.5">
+                <div className="relative shrink-0">
+                  <FileIcon fileName={name} />
+                  {currentLocalStatus === 'modified' && (
+                    <div className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-amber-500 ring-1 ring-white" title="檔案已修改" />
+                  )}
+                  {currentLocalStatus === 'new' && (
+                    <div className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-blue-500 ring-1 ring-white" title="全新檔案" />
+                  )}
+                </div>
+                
+                <div className="flex items-center space-x-2 min-w-0">
+                  <span className={`text-[13px] truncate leading-tight ${isSelected ? 'font-bold text-slate-900' : 'font-medium text-slate-700'}`} title={file.path}>
+                    {name}
+                  </span>
+                  
+                  <div className="hidden sm:flex items-center space-x-1 shrink-0">
+                    {currentLocalStatus === 'modified' && (
+                      <span className="text-[10px] font-black text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/40">
+                        已修改
+                      </span>
+                    )}
+                    {currentLocalStatus === 'new' && (
+                      <span className="text-[10px] font-black text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200/40">
+                        新增
+                      </span>
+                    )}
+                    {currentLocalStatus === 'synced' && (
+
+                      <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200/40">
+                        已同步
+                      </span>
+                    )}
+                    {currentLocalStatus === 'unknown' && (
+                      <span className="text-[10px] font-black text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded border border-sky-200/40">
+                        全新檔案
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </div>
+              
+              {file.status === 'syncing' && (
+                <div className="w-full mt-1.5 flex items-center space-x-2 pl-6">
+                  <div className="flex-1 h-1 bg-slate-100 rounded-full overflow-hidden relative">
+                    <div className="absolute top-0 left-0 h-full bg-blue-500 rounded-full w-1/3 animate-[pulse_1.5s_cubic-bezier(0.4,0,0.6,1)_infinite]" style={{ transform: 'translateX(100%)' }} />
+                  </div>
+                  <span className="text-[10px] text-blue-500 font-bold whitespace-nowrap">上傳中...</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center space-x-2 shrink-0">
+              {file.status === 'syncing' ? (
+                <Loader2 className="w-3 h-3 text-blue-500 animate-spin" />
+              ) : file.status === 'success' ? (
+                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+              ) : file.status === 'error' ? (
+                <div className="flex items-center space-x-1">
+                  <XCircle className="w-3 h-3 text-red-500" />
+                  <button 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setFiles(prev => prev.map(f => f.id === file.id ? { ...f, status: 'pending', errorMessage: undefined } : f));
+                      setTimeout(() => handleBatchSync(), 100);
+                    }}
+                    className="p-1 hover:bg-red-50 rounded text-red-500 group/retry transition-colors"
+                  >
+                    <RefreshCcw className="w-2.5 h-2.5 group-hover/retry:rotate-180 transition-transform duration-500" />
+                  </button>
+                </div>
+              ) : null}
+              
+              <button
+                onClick={(e) => { e.stopPropagation(); removeFile(file.id); }}
+                disabled={isProcessing}
+                className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-0 p-1"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
   };
+
 
   return (
     <div className="flex-1 flex flex-col h-full bg-transparent overflow-hidden animate-slide-in">
@@ -1381,15 +1454,21 @@ export default function BatchSync() {
                 </div>
 
                 {/* File Tree View - Now flex-1 to grow */}
-                <div id="batch-file-tree" className="rounded-xl border border-slate-200 bg-slate-50/30 shadow-inner flex-1 min-h-[300px] overflow-y-auto p-2 scroll-smooth">
+                <div id="batch-file-tree" className="rounded-xl border border-slate-200 bg-slate-50/30 shadow-inner flex-1 min-h-[300px] overflow-y-auto p-2 scroll-smooth" ref={parentRef}>
                   {filteredFiles.length === 0 ? (
                     <div className="h-full flex flex-col items-center justify-center text-slate-400 p-6 space-y-3">
                       <FileSearch className="w-12 h-12 opacity-30 drop-shadow-md" />
                       <p className="text-sm font-medium">尚未選擇檔案或拖曳目標至此。</p>
                     </div>
                   ) : (
-                    <div className="space-y-0.5">
-                      {renderTree(fileTree)}
+                    <div
+                      style={{
+                        height: `${rowVirtualizer.getTotalSize()}px`,
+                        width: '100%',
+                        position: 'relative',
+                      }}
+                    >
+                      {rowVirtualizer.getVirtualItems().map(renderVirtualRow)}
                     </div>
                   )}
                 </div>

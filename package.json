@@ -50,6 +50,7 @@
     "@radix-ui/react-progress": "^1.1.8",
     "@radix-ui/react-tabs": "^1.1.13",
     "@tailwindcss/vite": "^4.1.14",
+    "@tanstack/react-virtual": "^3.13.26",
     "@vitejs/plugin-react": "^5.0.4",
     "clsx": "^2.1.1",
     "diff-match-patch": "^1.0.5",
