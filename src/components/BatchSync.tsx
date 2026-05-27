@@ -86,6 +86,9 @@ export default function BatchSync() {
   // Add state for name filtering
   const [filterName, setFilterName] = useState('');
 
+  const [currentSyncingFile, setCurrentSyncingFile] = useState<string | null>(null);
+  const [isProgressCollapsed, setIsProgressCollapsed] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -212,8 +215,21 @@ export default function BatchSync() {
   }, []);
 
   const processFilesArray = useCallback((fileArray: File[], append = true) => {
+    let topLevelDir = '';
+    let allShareTopLevel = false;
+    if (fileArray.length > 0) {
+      const firstPath = fileArray[0].webkitRelativePath;
+      if (firstPath && firstPath.includes('/')) {
+        topLevelDir = firstPath.split('/')[0] + '/';
+        allShareTopLevel = fileArray.every(f => f.webkitRelativePath.startsWith(topLevelDir));
+      }
+    }
+
     const newFiles: FileItem[] = fileArray.map((file, index) => {
       let path = file.webkitRelativePath || file.name;
+      if (allShareTopLevel && path.startsWith(topLevelDir)) {
+        path = path.substring(topLevelDir.length);
+      }
       return {
         id: `${Date.now()}_${index}`,
         file,
@@ -440,6 +456,7 @@ export default function BatchSync() {
                const pMatch = msg.match(/(?:正在同步:|✅)\s*(.+?)(?:\s*\.\.\.|\s*同步成功)/);
                if (pMatch) {
                  const extractedPath = pMatch[1].trim();
+                 if (isStart) setCurrentSyncingFile(extractedPath);
                  setFiles(prev => prev.map(f => {
                    const fPath = cleanPath(basePath, f.path);
                    if (fPath === extractedPath) {
@@ -528,8 +545,23 @@ export default function BatchSync() {
   };
 
   const computeGitSha = async (file: File) => {
-    const buffer = await file.arrayBuffer();
-    const content = new Uint8Array(buffer);
+    let buffer = await file.arrayBuffer();
+    let content = new Uint8Array(buffer);
+    
+    // Normalize CRLF to LF for text files, as git stores LF usually.
+    // Use fatal: true to ensure we only apply this to truly valid UTF-8 text files.
+    try {
+      const decoder = new TextDecoder('utf-8', { fatal: true });
+      const text = decoder.decode(content);
+      // Ensure there are no null bytes (characteristic of binary files)
+      if (!text.includes('\0') && text.includes('\r\n')) {
+        const lfText = text.replace(/\r\n/g, '\n');
+        content = new TextEncoder().encode(lfText);
+      }
+    } catch (e) {
+      // Decode failed, meaning it's a binary file or non-utf-8, leave as is.
+    }
+
     const prefix = "blob " + content.length + "\0";
     const prefixBuffer = new TextEncoder().encode(prefix);
     const blobBuffer = new Uint8Array(prefixBuffer.length + content.length);
@@ -553,24 +585,30 @@ export default function BatchSync() {
       const newDiffs: Record<string, boolean> = {};
       const newSyncStates: Record<string, { lastModified: number; size: number }> = { ...fileSyncStates };
       let anyDiff = false;
+      let diffCount = 0;
       
       for (const f of files) {
         let fPath = cleanPath(basePath, f.path);
+        // Remove leading slash if any
+        if (fPath.startsWith('/')) fPath = fPath.substring(1);
+        
         const ghSha = treeMap.get(fPath);
         if (!ghSha) {
           // File not in github, so it's different (new)
           newDiffs[f.path] = true;
           anyDiff = true;
-          delete newSyncStates[`${repoName}:${f.path}`];
+          diffCount++;
+          delete newSyncStates[`${repoName}:${fPath}`];
         } else {
           const localSha = await computeGitSha(f.file);
           const isDiff = localSha !== ghSha;
           newDiffs[f.path] = isDiff;
           if (isDiff) {
              anyDiff = true;
-             delete newSyncStates[`${repoName}:${f.path}`];
+             diffCount++;
+             delete newSyncStates[`${repoName}:${fPath}`];
           } else {
-             newSyncStates[`${repoName}:${f.path}`] = { lastModified: f.file.lastModified, size: f.file.size };
+             newSyncStates[`${repoName}:${fPath}`] = { lastModified: f.file.lastModified, size: f.file.size };
           }
         }
       }
@@ -589,8 +627,8 @@ export default function BatchSync() {
         }));
       await storeService.updateFileSyncStateForFiles(repoName, syncMetadata);
 
-      setLogs(prev => [...prev, `[System] 比對完成！過濾檢視已啟用。`]);
-      window.dispatchEvent(new CustomEvent('global-toast', { detail: { message: '比對完成，已過濾並顯示差異檔案' } }));
+      setLogs(prev => [...prev, `[System] 比對完成！發現 ${diffCount} 個差異檔案。已啟用過濾檢視。`]);
+      window.dispatchEvent(new CustomEvent('global-toast', { detail: { message: `比對完成，顯示 ${diffCount} 個差異檔案` } }));
     } catch (err: any) {
       console.error(err);
       setLogs(prev => [...prev, `[Error] 無法比對：${err.message}`]);
@@ -1484,19 +1522,7 @@ export default function BatchSync() {
             <div className="mt-auto pt-6 flex flex-col space-y-4 border-t border-white/50">
               <div className="flex items-center justify-between">
                 <div className="flex-1 text-sm font-bold text-slate-500 flex flex-col pr-4">
-                  {isProcessing ? (
-                    <div className="w-full">
-                      <span className="text-blue-600 block mb-1">同步中: 已完成 {progress.current} / {progress.total}...</span>
-                      {progress.total > 0 && (
-                        <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden border border-slate-300">
-                          <div 
-                            className="bg-blue-600 h-2 rounded-full transition-all duration-300 ease-out" 
-                            style={{ width: `${Math.max(2, (progress.current / progress.total) * 100)}%` }}
-                          />
-                        </div>
-                      )}
-                    </div>
-                  ) : filteredFiles.length > 0 ? (
+                  {filteredFiles.length > 0 ? (
                     <>
                       <span>準備推播 {filteredFiles.length} 個檔案</span>
                       {filteredFiles.some(f => f.status === 'error') && (
@@ -1536,6 +1562,46 @@ export default function BatchSync() {
           </div>
         </div>
       </div>
+
+      {/* Floating Progress Capsule */}
+      {isProcessing && progress.total > 0 && (
+        <div className={`fixed bottom-8 left-1/2 -translate-x-1/2 z-50 bg-white/95 backdrop-blur-md border border-slate-200 shadow-[0_8px_30px_rgb(0,0,0,0.12)] rounded-2xl overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.23,1,0.32,1)] hover:scale-[1.02] hover:shadow-lg ${isProgressCollapsed ? 'w-48' : 'w-[400px] max-w-[90vw]'}`}>
+          <div className="p-4 flex items-center justify-between cursor-pointer group focus:outline-none" tabIndex={0} onKeyDown={(e) => { if(e.key==='Enter'||e.key===' ') setIsProgressCollapsed(!isProgressCollapsed) }} onClick={() => setIsProgressCollapsed(!isProgressCollapsed)} aria-label={isProgressCollapsed ? "Expand progress view" : "Collapse progress view"}>
+            <div className="flex items-center space-x-3 overflow-hidden">
+              <div className="relative flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-700 shrink-0">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <svg className="absolute inset-0 w-8 h-8 -rotate-90" viewBox="0 0 32 32">
+                  <circle cx="16" cy="16" r="14" fill="none" className="stroke-blue-200" strokeWidth="2" />
+                  <circle cx="16" cy="16" r="14" fill="none" className="stroke-blue-600 transition-all duration-300 ease-out" strokeWidth="2" strokeDasharray="87.96" strokeDashoffset={87.96 - (87.96 * Math.max(0, progress.current / progress.total))} strokeLinecap="round" />
+                </svg>
+              </div>
+              <div className="flex flex-col min-w-0">
+                <span className="text-sm font-bold text-slate-900">
+                  {Math.round((progress.current / progress.total) * 100)}% ({progress.current}/{progress.total})
+                </span>
+                {!isProgressCollapsed && (
+                  <span className="text-xs font-medium text-slate-600 truncate mt-0.5">
+                    正在同步: {currentSyncingFile || '系統處理中...'}
+                  </span>
+                )}
+              </div>
+            </div>
+            <button className="text-slate-500 group-hover:text-slate-800 transition-colors shrink-0 p-1 focus:outline-none focus:ring-2 focus:ring-blue-500 rounded-md" aria-label={isProgressCollapsed ? 'Expand' : 'Collapse'}>
+               {isProgressCollapsed ? <Maximize className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+            </button>
+          </div>
+          {!isProgressCollapsed && (
+            <div className="px-4 pb-4">
+              <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                <div 
+                  className="bg-blue-600 h-1.5 rounded-full transition-all duration-300 ease-out" 
+                  style={{ width: `${Math.max(2, (progress.current / progress.total) * 100)}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
