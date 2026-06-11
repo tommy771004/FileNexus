@@ -1,8 +1,29 @@
+@import url('https://api.fontshare.com/v2/css?f[]=clash-display@300,400,500,600,750&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;650&display=swap');
 @import "tailwindcss";
 
 @theme {
+  --color-hyper-500: #0055FF;
+  --color-hyper-600: #0047D6;
+  --color-laser-cyan: #06B6D4;
+  --color-laser-indigo: #4F46E5;
+  --color-neon-mint: #34D399;
+  --color-neon-cherry: #FB7185;
+  --color-slate-900: #0F172A;
+  --color-slate-950: #090D16;
+  --color-diff-green: #10B981;
+  --color-diff-red: #EF4444;
+  --color-warning-amber: #F59E0B;
+  
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Clash Display", "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
   --animate-fade-in: fade-in 0.3s ease-out forwards;
   --animate-slide-in: slide-in 0.4s ease-out forwards;
+  --animate-liquid-slide: liquid-slide 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  --animate-toast-in: toast-in 0.8s cubic-bezier(0.2, 0.8, 0.2, 1.1) forwards;
+  --animate-toast-out: toast-out 0.8s cubic-bezier(0.2, 0.8, 0.2, 1.1) forwards;
 }
 
 :root {
@@ -19,14 +40,29 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes liquid-slide {
+  from { opacity: 0; transform: translateX(-12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(20px) scale(0.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes toast-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(20px) scale(0.95); }
+}
+
 body {
-  @apply bg-slate-50 text-slate-900 antialiased;
+  @apply bg-[#090D16] text-[#E2E8F0] antialiased font-sans;
 }
 
 /* Custom scrollbars for a cleaner look */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
@@ -34,10 +70,114 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.3);
-  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.15);
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 163, 184, 0.6);
+  background: rgba(148, 163, 184, 0.3);
 }
+
+/* Glass panel glow effects representing abstraction layers */
+.glass-panel {
+  background: rgba(15, 23, 42, 0.65);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.glass-panel:hover {
+  border-color: rgba(0, 85, 255, 0.15);
+}
+
+/* Elegant, subdued Monaco DiffEditor highlights matching macOS translucency */
+.monaco-editor .line-delete,
+.monaco-editor .char-delete {
+  background-color: rgba(239, 68, 68, 0.12) !important;
+}
+
+.monaco-editor .line-insert,
+.monaco-editor .char-insert {
+  background-color: rgba(16, 185, 129, 0.12) !important;
+}
+
+.monaco-diff-editor .diffViewer .deleted-line-margin,
+.monaco-diff-editor .diffViewer .added-line-margin {
+  background-color: transparent !important;
+}
+
+/* --- Liquid Glass UI Core --- */
+
+/* 1. 基礎玻璃質感 & 2. 立體厚度邊框與懸浮陰影 */
+.liquid-glass {
+  /* Frosted Glass: high blur, low opacity white base */
+  background: rgba(255, 255, 255, 0.05); /* Slight white tint */
+  backdrop-filter: blur(25px) saturate(180%) brightness(1.1);
+  -webkit-backdrop-filter: blur(25px) saturate(180%) brightness(1.1);
+  
+  /* Stroke & Drop Shadow: Inner highlight simulation & multi-layer ambient shadow */
+  box-shadow: 
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.15), /* Highlight on inner edge */
+    0 20px 40px rgba(0, 0, 0, 0.25),   /* Deep suspension shadow */
+    0 4px 12px rgba(0, 0, 0, 0.15);    /* Closer contact shadow */
+    
+  /* Ensure border-radius and inner contents don't bleed out */
+  position: relative;
+  border-radius: 1.5rem;
+}
+
+/* 3. 邊緣掃光 (Edge Glow / CC Light Sweep) */
+.liquid-glass-sweep {
+  position: relative;
+  overflow: hidden;
+}
+
+.liquid-glass-sweep::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -150%;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(
+    to right,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.3) 50%,
+    rgba(255, 255, 255, 0) 100%
+  );
+  transform: skewX(-25deg);
+  animation: liquidLightSweep 5s infinite cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+  z-index: 10;
+  mix-blend-mode: overlay; /* Blends nicely with the frosted background */
+}
+
+@keyframes liquidLightSweep {
+  0% { left: -150%; }
+  30% { left: 250%; } /* Fast sweep */
+  100% { left: 250%; } /* Wait for next cycle */
+}
+
+/* 4. 液態過渡與極端動態曲線 (Extreme Ease) */
+.liquid-morph {
+  /* 效能優化: Use will-change for properties we animate frequently */
+  will-change: transform, opacity, width, height, border-radius;
+  transform: translateZ(0); /* Force hardware GPU acceleration */
+  backface-visibility: hidden;
+  /* Intense "snap" cubic-bezier curve from AE */
+  transition: all 0.8s cubic-bezier(0.2, 0.8, 0.2, 1.1);
+}
+
+.glass-interaction {
+  transition: backdrop-filter 0.5s cubic-bezier(0.2, 0.8, 0.2, 1.1), filter 0.5s cubic-bezier(0.2, 0.8, 0.2, 1.1);
+}
+
+.glass-interaction:hover {
+  backdrop-filter: blur(30px) saturate(200%) brightness(1.2);
+  -webkit-backdrop-filter: blur(30px) saturate(200%) brightness(1.2);
+}
+
+.elegant-border {
+  border-color: rgba(255, 255, 255, 0.04);
+}
+

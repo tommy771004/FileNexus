@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useSyncState } from '../contexts/SyncContext';
 import { Files, Send, Loader2, FolderUp, FilePlus, CheckCircle2, XCircle, Clock, GitBranch,
   Folder, FolderOpen, File, FileCode2, FileJson, FileText, Image, ChevronRight, ChevronDown,
   FileSearch, Trash2, Sparkles, RefreshCcw, HardDrive, Database, Music, Video, Archive,
@@ -51,6 +52,7 @@ const FileIcon = ({ fileName, className }: { fileName: string; className?: strin
 };
 
 export default function BatchSync() {
+  const { setToast, refreshSidebarData, updateStatusGlobally } = useSyncState();
   const [repoName, setRepoName] = useState('');
   const [branch, setBranch] = useState('main');
   const [basePath, setBasePath] = useState('');
@@ -61,6 +63,7 @@ export default function BatchSync() {
   const [globalError, setGlobalError] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [keyboardFocusedIndex, setKeyboardFocusedIndex] = useState<number>(-1);
   const [fileSyncStates, setFileSyncStates] = useState<Record<string, { lastModified: number; size: number }>>({});
   const [previewContent, setPreviewContent] = useState<{ name: string; content: string; status: string; language?: string; isTruncated?: boolean; file?: File } | null>(null);
   const [activeTab, setActiveTab] = useState<'logs' | 'preview'>('logs');
@@ -79,6 +82,46 @@ export default function BatchSync() {
   const [useDateFilter, setUseDateFilter] = useState(false);
   const [filterDateTime, setFilterDateTime] = useState('');
 
+  // Dynamic 2026 Ethereal Status Monitor based on files state
+  const batchStatusIndicator = useMemo(() => {
+    if (files.length === 0) {
+      return {
+        label: '無項目掛載 (No Files Mounted)',
+        classes: 'bg-slate-500/5 text-slate-550 border-slate-500/15',
+        dotClass: 'bg-slate-550'
+      };
+    }
+    const hasError = files.some(f => f.status === 'error');
+    if (hasError) {
+      return {
+        label: '同步失敗',
+        classes: 'bg-red-500/5 text-red-500 border-red-500/15 animate-[pulse_1.5s_infinite]',
+        dotClass: 'bg-red-500'
+      };
+    }
+    const isCurrentlySyncing = files.some(f => f.status === 'syncing');
+    if (isCurrentlySyncing) {
+      return {
+        label: '同步中',
+        classes: 'bg-blue-500/5 text-blue-400 border-blue-500/15',
+        dotClass: 'bg-blue-400 animate-pulse'
+      };
+    }
+    const allSuccessful = files.every(f => f.status === 'success');
+    if (allSuccessful) {
+      return {
+        label: '全數安全同步 (Archived & Synced)',
+        classes: 'bg-emerald-500/5 text-emerald-500 border-emerald-500/15',
+        dotClass: 'bg-emerald-500'
+      };
+    }
+    return {
+      label: '工作區待同步 (Ready to Sync)',
+      classes: 'bg-amber-500/5 text-amber-500 border-amber-500/15',
+      dotClass: 'bg-amber-500'
+    };
+  }, [files]);
+
   // Add state for extension filtering
   const [useExtFilter, setUseExtFilter] = useState(false);
   const [filterExtension, setFilterExtension] = useState('.js, .ts, .css, .html');
@@ -95,14 +138,21 @@ export default function BatchSync() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
+  const logsContainerRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<boolean>(false);
 
-  // Auto-scroll logs
+  const handleCancelBatchSync = useCallback(() => {
+    abortRef.current = true;
+    setLogs(prev => [...prev, `[Cancel] ⚠️ 同步已被使用者取消。正在安全中斷...`]);
+    setToast('同步已取消');
+  }, []);
+
+  // Auto-scroll logs container safely without moving the parent window scroll viewport
   useEffect(() => {
-    if (logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (activeTab === 'logs' && logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
     }
-  }, [logs]);
+  }, [logs, activeTab]);
 
   // Set default datetime to 1 hour ago
   useEffect(() => {
@@ -202,9 +252,7 @@ export default function BatchSync() {
     setFiles(prev => append ? [...prev, ...newFiles] : newFiles);
     
     if (source === 'drag') {
-      window.dispatchEvent(new CustomEvent('global-toast', { 
-        detail: { message: `已匯入 ${newFiles.length} 個檔案至批次同步 (已略過 node_modules 等目錄)。` } 
-      }));
+      setToast(`已匯入 ${newFiles.length} 個檔案至批次同步 (已略過 node_modules 等目錄)。`);
     }
   }, [getLocalStatus]);
 
@@ -224,16 +272,34 @@ export default function BatchSync() {
     const loadDefaults = async () => {
       const savedOwner = await storeService.get('github_owner');
       const savedRepo = await storeService.get('github_repo');
+      const savedBasePath = await storeService.get('github_base_path');
       if (savedOwner && savedRepo) {
         setRepoName(`${savedOwner}/${savedRepo}`);
       } else if (savedOwner) {
         setRepoName(`${savedOwner}/`);
+      }
+      if (savedBasePath) {
+        setBasePath(savedBasePath);
       }
 
       const states = await storeService.getFileSyncState();
       setFileSyncStates(states);
     };
     loadDefaults();
+  }, []);
+
+  // Listen for active profile shifts from the global layout sidebar
+  useEffect(() => {
+    const handleProfileShift = (e: any) => {
+      const { profile } = e.detail;
+      if (profile) {
+        let baseRepo = profile.owner && profile.repo ? `${profile.owner}/${profile.repo}` : profile.owner ? `${profile.owner}/` : '';
+        setRepoName(baseRepo);
+        setBasePath(profile.basePath || '');
+      }
+    };
+    window.addEventListener('filenexus-profile-changed', handleProfileShift);
+    return () => window.removeEventListener('filenexus-profile-changed', handleProfileShift);
   }, []);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -266,9 +332,7 @@ export default function BatchSync() {
 
   const handleSelectDirectoryAPI = async () => {
     if (!('showDirectoryPicker' in window)) {
-      window.dispatchEvent(new CustomEvent('global-toast', { 
-        detail: { message: '您的瀏覽器不支援目錄選取功能，請嘗試使用最新版 Chrome 或 Edge。' } 
-      }));
+      setToast('您的瀏覽器不支援目錄選取功能，請嘗試使用最新版 Chrome 或 Edge。');
       return;
     }
 
@@ -281,19 +345,19 @@ export default function BatchSync() {
       setHasCachedDir(true);
       
       setIsProcessing(true);
+      updateStatusGlobally('scanning', '載入目錄中...');
       setLogs(prev => [...prev, `[System] 正在掃描目錄 ${dirHandle.name}...`]);
       const fileArray = await getFilesRecurse(dirHandle, '');
       processFilesArray(fileArray, false);
       setIsProcessing(false);
+      updateStatusGlobally('idle', '');
       setLogs(prev => [...prev, `[System] 已載入目錄 ${dirHandle.name}，共 ${fileArray.length} 個檔案。`]);
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         console.error('Directory selection failed:', err);
         const errorMsg = err.name === 'SecurityError' ? '瀏覽器安全性限制（可能是因為在 iframe 中執行），無法開啟目錄選取器。' : (err.message || '未知錯誤');
         setLogs(prev => [...prev, `[Error] 無法選取目錄：${errorMsg}`]);
-        window.dispatchEvent(new CustomEvent('global-toast', { 
-          detail: { message: `選取失敗：${errorMsg}` } 
-        }));
+        setToast(`選取失敗：${errorMsg}`);
       }
       setIsProcessing(false);
     }
@@ -323,15 +387,15 @@ export default function BatchSync() {
       }
 
       setIsProcessing(true);
+      updateStatusGlobally('scanning', '載入目錄中...');
       setLogs(prev => [...prev, `[System] 正在重新掃描目錄 ${dirHandle.name}...`]);
       const fileArray = await getFilesRecurse(dirHandle, '');
       processFilesArray(fileArray, false);
       setIsProcessing(false);
+      updateStatusGlobally('idle', '');
       setLogs(prev => [...prev, `[System] 已重新載入專案，共 ${fileArray.length} 個檔案。`]);
       
-      window.dispatchEvent(new CustomEvent('global-toast', { 
-        detail: { message: `已還原快取目錄：${dirHandle.name}` } 
-      }));
+      setToast(`已還原快取目錄：${dirHandle.name}`);
     } catch (err: any) {
       console.error('Reload failed:', err);
       // If the handle is dead (e.g. site shifted or deleted in IDB)
@@ -348,6 +412,11 @@ export default function BatchSync() {
   const removeFile = useCallback((id: string) => {
     if (isProcessing) return;
     setFiles(prev => prev.filter(f => f.id !== id));
+  }, [isProcessing]);
+
+  const removeFolder = useCallback((folderPath: string) => {
+    if (isProcessing) return;
+    setFiles(prev => prev.filter(f => !(f.path.startsWith(folderPath + '/'))));
   }, [isProcessing]);
 
   const readFileAsBase64 = useCallback((file: File): Promise<string> => {
@@ -380,6 +449,8 @@ export default function BatchSync() {
 
     setGlobalError('');
     setIsProcessing(true);
+    updateStatusGlobally('syncing', '正在批次同步...');
+    abortRef.current = false;
     setLogs([]);
     setProgress({ current: 0, total: filteredFiles.length });
 
@@ -465,7 +536,8 @@ export default function BatchSync() {
                }
             }
           }
-        }
+        },
+        () => abortRef.current
       );
 
       // 3. Set success status for all processed files
@@ -500,6 +572,9 @@ export default function BatchSync() {
         url: result.html_url
       });
 
+      // Refresh sidebar state immediately
+      refreshSidebarData();
+
     } catch (err: any) {
       console.error(err);
       const errorMessage = err.message || '未知錯誤';
@@ -514,6 +589,7 @@ export default function BatchSync() {
     } finally {
       setIsProcessing(false);
       setIsAnalyzing(false);
+      updateStatusGlobally('idle', '');
     }
   }, [repoName, branch, basePath, commitMessage, files, filteredFiles, readFileAsBase64]);
 
@@ -599,7 +675,7 @@ export default function BatchSync() {
 
   const handleSyncRepo = async () => {
     if (!repoName.includes('/')) {
-      window.dispatchEvent(new CustomEvent('global-toast', { detail: { message: '請輸入有效的 GitHub 儲存庫名稱' } }));
+      setToast('請輸入有效的 GitHub 儲存庫名稱');
       return;
     }
     setSyncingRepo(true);
@@ -709,7 +785,7 @@ export default function BatchSync() {
       await storeService.updateFileSyncStateForFiles(repoName, syncMetadata);
 
       setLogs(prev => [...prev, `[System] 比對完成！發現 ${diffCount} 個差異檔案。已啟用過濾檢視。`]);
-      window.dispatchEvent(new CustomEvent('global-toast', { detail: { message: `比對完成，顯示 ${diffCount} 個差異檔案` } }));
+      setToast(`比對完成，顯示 ${diffCount} 個差異檔案`);
     } catch (err: any) {
       console.error(err);
       setLogs(prev => [...prev, `[Error] 無法比對：${err.message}`]);
@@ -843,9 +919,7 @@ export default function BatchSync() {
                    ['js', 'jsx', 'ts', 'tsx', 'json', 'md', 'html', 'css', 'txt'].includes(file.name.split('.').pop()?.toLowerCase() || '');
 
     if (!isText) {
-      window.dispatchEvent(new CustomEvent('global-toast', { 
-        detail: { message: `無法預覽二進位檔案: ${file.name}` } 
-      }));
+      setToast(`無法預覽二進位檔案: ${file.name}`);
       return;
     }
 
@@ -986,6 +1060,33 @@ export default function BatchSync() {
           }
           return f;
        }));
+
+       // Also update expandedFolders and customOrder keys to reflect the new paths
+       if (draggedItem.type === 'folder') {
+         setExpandedFolders(prev => {
+           const next = { ...prev };
+           Object.keys(next).forEach(k => {
+             if (k === draggedItem.path || k.startsWith(draggedItem.path + '/')) {
+               const newK = newPath + k.substring(draggedItem.path.length);
+               next[newK] = next[k];
+               delete next[k];
+             }
+           });
+           return next;
+         });
+         
+         setCustomOrder(prev => {
+           const next = { ...prev };
+           Object.keys(next).forEach(k => {
+             if (k === draggedItem.path || k.startsWith(draggedItem.path + '/')) {
+               const newK = newPath + k.substring(draggedItem.path.length);
+               next[newK] = next[k];
+               delete next[k];
+             }
+           });
+           return next;
+         });
+       }
     }
 
     setCustomOrder(prev => {
@@ -1094,10 +1195,61 @@ export default function BatchSync() {
     overscan: 10,
   });
 
+  const handleTreeKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (flattenedTree.length === 0) return;
+    
+    // Check key
+    if (['ArrowDown', 'ArrowUp', ' ', 'Enter'].includes(e.key)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+
+    if (e.key === 'ArrowDown') {
+      setKeyboardFocusedIndex(prev => {
+        const next = prev < flattenedTree.length - 1 ? prev + 1 : prev;
+        rowVirtualizer.scrollToIndex(next, { align: 'auto' });
+        return next;
+      });
+    } else if (e.key === 'ArrowUp') {
+      setKeyboardFocusedIndex(prev => {
+        const next = prev > 0 ? prev - 1 : 0;
+        rowVirtualizer.scrollToIndex(next, { align: 'auto' });
+        return next;
+      });
+    } else if (e.key === ' ') {
+      const item = flattenedTree[keyboardFocusedIndex];
+      if (item && item.node.type === 'file') {
+        const clickEvent = { ctrlKey: false, shiftKey: false } as any as React.MouseEvent;
+        handleFileClick(clickEvent, item.node.fileItem!);
+        setActiveTab('preview');
+      }
+    } else if (e.key === 'Enter') {
+      const item = flattenedTree[keyboardFocusedIndex];
+      if (item) {
+        if (item.node.type === 'folder') {
+          toggleFolder(item.node.path);
+        } else {
+          // Toggle selection
+          const fileId = item.node.fileItem!.id;
+          setSelectedFileIds(prev => {
+            const next = new Set(prev);
+            if (next.has(fileId)) {
+              next.delete(fileId);
+            } else {
+              next.add(fileId);
+            }
+            return next;
+          });
+        }
+      }
+    }
+  }, [flattenedTree, keyboardFocusedIndex, handleFileClick, toggleFolder, rowVirtualizer]);
+
   const renderVirtualRow = (virtualRow: any) => {
     const item = flattenedTree[virtualRow.index];
     const { name, node, depth, parentPath } = item;
     
+    const isKeyboardFocused = keyboardFocusedIndex === virtualRow.index;
     const isDragOver = dragOverItem?.path === node.path;
     const dropPosition = dragOverItem?.position;
     const dropClass = isDragOver ? (
@@ -1117,8 +1269,8 @@ export default function BatchSync() {
               onDragOver={(e) => handleDragOver(e, { path: node.path, type: 'folder', parentPath, name })}
               onDrop={handleTreeDrop}
               onDragEnd={clearDrag}
-              onClick={() => toggleFolder(node.path)}
-              className={`flex items-center space-x-2 py-1 px-2 hover:bg-slate-200/50 cursor-pointer transition-colors group rounded-md ${dropClass}`}
+              onClick={() => { setKeyboardFocusedIndex(virtualRow.index); toggleFolder(node.path); }}
+              className={`flex items-center space-x-2 py-1 px-2 hover:bg-slate-200/50 cursor-pointer transition-colors group rounded-md ${dropClass} ${isKeyboardFocused ? 'ring-2 ring-blue-500/80 bg-blue-50/15 border-blue-300' : ''}`}
               style={{ paddingLeft: `${depth * 12 + 4}px` }}
             >
               <div className="flex items-center transition-transform duration-200 shrink-0">
@@ -1133,7 +1285,15 @@ export default function BatchSync() {
                   <Folder className="w-4 h-4 text-amber-300 fill-amber-300/5" />
                 }
               </div>
-              <span className="text-xs font-bold text-slate-700 truncate select-none">{name}</span>
+              <span className="text-xs font-bold text-slate-700 truncate select-none flex-1">{name}</span>
+              <button
+                onClick={(e) => { e.stopPropagation(); removeFolder(node.path); }}
+                disabled={isProcessing}
+                className="text-slate-400 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-0 p-1 shrink-0 ml-auto"
+                title="移除資料夾"
+              >
+                <Trash2 className="w-3 h-3" />
+              </button>
             </div>
           </div>
         </div>
@@ -1153,8 +1313,8 @@ export default function BatchSync() {
             onDragOver={(e) => handleDragOver(e, { path: node.path, type: 'file', parentPath, name })}
             onDrop={handleTreeDrop}
             onDragEnd={clearDrag}
-            onClick={(e) => handleFileClick(e, file)}
-            className={`flex justify-between items-center py-1.5 px-3 hover:bg-white transition-all duration-200 group rounded-lg border cursor-pointer ${isSelected ? 'bg-white border-blue-200 shadow-sm ring-1 ring-blue-100' : 'border-transparent hover:border-slate-200/60'} ${dropClass}`}
+            onClick={(e) => { setKeyboardFocusedIndex(virtualRow.index); handleFileClick(e, file); }}
+            className={`flex justify-between items-center py-1.5 px-3 hover:bg-white transition-all duration-200 group rounded-lg border cursor-pointer ${isSelected ? 'bg-white border-blue-200 shadow-sm ring-1 ring-blue-100' : 'border-transparent hover:border-slate-200/60'} ${dropClass} ${isKeyboardFocused ? 'ring-2 ring-blue-500/80 bg-blue-50/15 border-blue-300 shadow-sm' : ''}`}
             style={{ marginLeft: `${depth * 12 + 20}px` }}
           >
             <div className="flex flex-col flex-1 min-w-0 pr-2">
@@ -1165,7 +1325,7 @@ export default function BatchSync() {
                     <div className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-amber-500 ring-1 ring-white" title="檔案已修改" />
                   )}
                   {currentLocalStatus === 'new' && (
-                    <div className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-blue-500 ring-1 ring-white" title="全新檔案" />
+                    <div className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-emerald-500 ring-1 ring-white" title="全新檔案" />
                   )}
                 </div>
                 
@@ -1181,7 +1341,7 @@ export default function BatchSync() {
                       </span>
                     )}
                     {currentLocalStatus === 'new' && (
-                      <span className="text-[10px] font-black text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200/40">
+                      <span className="text-[10px] font-black text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200/40">
                         新增
                       </span>
                     )}
@@ -1247,54 +1407,65 @@ export default function BatchSync() {
 
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-transparent overflow-hidden animate-slide-in">
-      <div className="hidden md:flex h-20 items-center justify-between border-b border-slate-200/60 px-10 bg-white/40 backdrop-blur-md shadow-[0_1px_2px_rgba(0,0,0,0.02)] shrink-0">
-        <div className="flex items-center">
-          <div className="bg-slate-900/5 p-2 rounded-xl border border-slate-200/50 mr-4">
-            <Files className="size-5 text-slate-800" />
+    <div className="flex-1 flex flex-col h-full bg-[#090D16] overflow-hidden animate-fade-in relative">
+      {/* Background radial highlight */}
+      <div className="absolute top-10 right-10 w-[250px] height-[250px] rounded-full bg-hyper-500/5 blur-3xl pointer-events-none" />
+
+      <div className="hidden md:flex h-16 items-center justify-between border-b border-slate-900 px-8 bg-[#0E1321]/40 backdrop-blur-xl shrink-0">
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center">
+            <Files className="size-4 mr-2 text-white/50" />
+            <span className="text-sm font-medium text-white/60">
+              批次同步
+            </span>
           </div>
-          <span className="text-sm font-black text-slate-800 tracking-tight uppercase">
-            INTEGRATION / BATCH SYNC ENGINE
-          </span>
+          
+          <div className={`hidden lg:flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-[10px] font-mono font-medium border transition-all duration-300 ${batchStatusIndicator.classes}`}>
+            <span className="relative flex h-1.5 w-1.5">
+              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${batchStatusIndicator.dotClass}`}></span>
+              <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${batchStatusIndicator.dotClass}`}></span>
+            </span>
+            <span>{batchStatusIndicator.label}</span>
+          </div>
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-6 sm:p-12 relative flex flex-col">
-        <div className="flex-1 flex flex-col w-full min-w-0 max-w-7xl mx-auto h-full">
-          <div className="flex-1 flex flex-col space-y-8 bg-white shadow-sm border border-slate-200 rounded-3xl p-6 sm:p-12">
-            <div className="flex flex-col sm:flex-row items-start justify-between pb-6 border-b border-slate-100/50 space-y-4 sm:space-y-0 text-pretty">
+      <div className="flex-1 overflow-auto p-6 sm:p-8 relative flex flex-col">
+        <div className="flex-1 flex flex-col w-full min-w-0 max-w-7xl mx-auto h-full space-y-6">
+          <div className="flex-1 flex flex-col space-y-6 liquid-glass liquid-morph light-sweep-wrapper shadow-2xl border border-slate-800/80 rounded-2xl p-6 sm:p-8">
+            <div className="flex flex-col sm:flex-row items-start justify-between pb-6 border-b border-slate-900/60 space-y-4 sm:space-y-0 text-pretty">
               <div>
-                <h2 className="text-2xl font-black tracking-tight text-slate-900">批次專案同步引擎</h2>
-                <p className="text-sm font-bold text-slate-400 mt-2">
-                  一次拖曳多個檔案與目錄，系統會自動歸類狀態，並確保透過樹狀目錄直接部署。
+                <h2 className="text-xl font-medium tracking-tight text-white/90">批次同步</h2>
+                <p className="text-sm text-white/60 mt-1 max-w-2xl">
+                  一次拖曳多個檔案與目錄，系統會進行自動同步。
                 </p>
               </div>
               <button
                 onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'github' }))}
-                className="flex items-center space-x-2 px-4 py-2.5 text-xs font-bold text-slate-600 bg-slate-50 hover:bg-slate-100 hover:text-slate-900 rounded-xl border border-slate-200 transition-colors active:scale-95 shrink-0 whitespace-nowrap shadow-sm w-full sm:w-auto justify-center"
-                title="返回單檔同步"
+                className="flex items-center space-x-2 px-4 py-2 h-10 text-xs font-semibold text-slate-300 hover:text-white bg-slate-800/40 hover:bg-slate-800 rounded-lg border border-slate-700/50 transition-colors active:scale-95 shrink-0 whitespace-nowrap shadow-md w-full sm:w-auto justify-center"
+                title="返回單檔編輯"
               >
-                <GitBranch className="size-4" />
-                <span>單檔編輯同步</span>
+                <GitBranch className="size-3.5 text-hyper-500" />
+                <span>切換至單檔編輯</span>
               </button>
             </div>
 
-            <div className="border-b border-slate-100/50 pb-6">
-              <label className="text-sm font-bold text-slate-700 flex items-center mb-3">
-                <HardDrive className="w-4 h-4 mr-2 text-slate-500" />
-                本地工作目錄 (Workspace)
+            <div className="border-b border-slate-900/60 pb-6">
+              <label className="text-[11px] font-bold text-slate-400 tracking-wider uppercase flex items-center mb-2">
+                <HardDrive className="w-3.5 h-3.5 mr-1.5 text-hyper-500" />
+                Workspace Directory / 常駐工作目錄
               </label>
               <div className="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3">
-                <div className="flex-1 flex items-center bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-medium text-slate-700 overflow-hidden shadow-inner">
-                  <Folder className="w-4 h-4 text-amber-500 mr-2 shrink-0" />
-                  <span className="truncate flex-1 font-mono text-xs">
+                <div className="flex-1 flex items-center bg-slate-950/40 border border-slate-800 rounded-lg px-4 py-2.5 text-sm overflow-hidden">
+                  <Folder className="w-4 h-4 text-slate-500 mr-2 shrink-0" />
+                  <span className="truncate flex-1 font-mono text-xs text-slate-400">
                     {localFolderPath || '尚未選擇目錄...'}
                   </span>
                 </div>
                 <button
                   onClick={handleSelectDirectoryAPI}
                   disabled={isProcessing}
-                  className="shrink-0 px-4 py-2.5 bg-slate-900 text-white rounded-xl text-sm font-bold shadow-sm hover:bg-slate-800 transition-colors disabled:opacity-50 flex items-center justify-center space-x-2"
+                  className="shrink-0 px-4 h-10 bg-[#0055FF] hover:bg-[#0047D6] text-white rounded-lg text-xs font-semibold shadow-[0_4px_12px_rgba(0,85,255,0.2)] transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center space-x-2 min-w-[150px]"
                   title={!('showDirectoryPicker' in window) ? "瀏覽器不支援" : "選擇目錄後會自動掃描"}
                 >
                   <FolderOpen className="w-4 h-4" />
@@ -1304,57 +1475,60 @@ export default function BatchSync() {
                   <button
                     onClick={handleReloadDirectoryAPI}
                     disabled={isProcessing}
-                    className="shrink-0 px-4 py-2.5 bg-blue-50 text-blue-600 border border-blue-200 rounded-xl text-sm font-bold shadow-sm hover:bg-blue-100 transition-colors disabled:opacity-50 flex items-center justify-center space-x-2"
+                    className="shrink-0 px-4 h-10 bg-hyper-500/10 text-hyper-400 border border-hyper-500/20 rounded-lg text-xs font-semibold hover:bg-hyper-500/20 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center space-x-2"
                     title="從快取中還原先前的目錄"
                   >
                     <RefreshCcw className={`w-4 h-4 ${isProcessing ? 'animate-spin' : ''}`} />
-                    <span>載入上次目錄</span>
+                    <span>載入上次快取</span>
                   </button>
                 )}
               </div>
-              <p className="text-[11px] font-bold text-slate-400 mt-2 ml-1">
-                選取後將記憶您的目錄。下次開啟本頁面，點擊「載入上次目錄」即可直接還原專案檔案。
+              <p className="text-[10px] text-[#A0AEC0] mt-2 ml-1">
+                系統端能記錄您上一次的選擇結果，避免在每次重置頁面時重複尋導手選。
               </p>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 pt-1">
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700 flex items-center">
-                  儲存庫名稱 (Repository) <span className="ml-1 text-red-500">*</span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2 font-sans">
+              <div className="space-y-1.5">
+                <label htmlFor="batch-repo-input" className="text-[11px] font-bold text-slate-400 tracking-wider uppercase flex items-center">
+                  儲存庫名稱 (Repository) <span className="text-hyper-500 ml-1">*</span>
                 </label>
                 <input
+                  id="batch-repo-input"
                   type="text"
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-medium text-slate-900 placeholder-slate-400 focus:border-slate-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-slate-100 disabled:opacity-50 transition-all"
-                  placeholder="例如：username/repo-name"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950/40 px-3.5 py-2.5 text-xs font-medium text-slate-100 placeholder-slate-600 focus:border-hyper-500 focus:ring-1 focus:ring-hyper-500 focus:bg-[#0A0D16] focus:outline-none transition-all shadow-inner font-mono"
+                  placeholder="e.g. username/repo-name"
                   value={repoName}
                   onChange={(e) => setRepoName(e.target.value)}
                   disabled={isProcessing}
                 />
               </div>
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700 flex items-center">
-                  目標內部路徑 (選填)
+              <div className="space-y-1.5">
+                <label htmlFor="batch-base-path-input" className="text-[11px] font-bold text-slate-400 tracking-wider uppercase flex items-center">
+                  路徑 (預設根目錄)
                 </label>
                 <input
+                  id="batch-base-path-input"
                   type="text"
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-medium text-slate-900 placeholder-slate-400 focus:border-slate-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-slate-100 disabled:opacity-50 transition-all"
-                  placeholder="例如：src/assets (檔案放在儲存庫的哪個位置)"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950/40 px-3.5 py-2.5 text-xs font-medium text-slate-100 placeholder-slate-600 focus:border-hyper-500 focus:ring-1 focus:ring-hyper-500 focus:bg-[#0A0D16] focus:outline-none transition-all shadow-inner font-mono"
+                  placeholder="e.g. src/assets"
                   value={basePath}
                   onChange={(e) => setBasePath(e.target.value)}
                   disabled={isProcessing}
                 />
               </div>
 
-              <div className="space-y-2">
-                <label className="text-sm font-bold text-slate-700 flex items-center">
-                  分支 (Branch) <span className="ml-1 text-red-500">*</span>
+              <div className="space-y-1.5">
+                <label htmlFor="batch-branch-input" className="text-[11px] font-bold text-slate-400 tracking-wider uppercase flex items-center">
+                  分支 (Branch) <span className="text-hyper-500 ml-1">*</span>
                 </label>
                 <div className="relative">
-                  <GitBranch className="absolute left-3.5 top-3 size-4 text-slate-400" />
+                  <GitBranch className="absolute left-3 top-3.5 size-3.5 text-slate-500" />
                   <input
+                    id="batch-branch-input"
                     type="text"
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50 pl-10 pr-4 py-2.5 text-sm font-medium text-slate-900 placeholder-slate-400 focus:border-slate-400 focus:bg-white focus:outline-none focus:ring-4 focus:ring-slate-100 disabled:opacity-50 transition-all"
-                    placeholder="例如：main 或 master"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-950/40 pl-9 pr-3.5 py-2.5 text-xs font-medium text-slate-100 placeholder-slate-600 focus:border-hyper-500 focus:ring-1 focus:ring-hyper-500 focus:bg-[#0A0D16] focus:outline-none transition-all shadow-inner font-mono"
+                    placeholder="e.g. main"
                     value={branch}
                     onChange={(e) => setBranch(e.target.value)}
                     disabled={isProcessing}
@@ -1363,18 +1537,19 @@ export default function BatchSync() {
               </div>
             </div>
 
-            <div className="space-y-2 border-t border-white/50 pt-5">
-              <label className="text-sm font-bold text-slate-700 flex items-center justify-between">
+            <div className="space-y-1.5 border-t border-slate-900/60 pt-6 font-sans">
+              <label htmlFor="batch-commit-input" className="text-[11px] font-bold text-slate-400 tracking-wider uppercase flex items-center justify-between">
                 <div className="flex items-center">
-                  全域提交訊息 (選填)
-                  {isAnalyzing && <Sparkles className="ml-2 size-3 text-blue-500 animate-pulse" />}
+                  全域提交訊息 (Commit Message)
+                  {isAnalyzing && <Sparkles className="ml-2 size-3 text-blue-450 animate-pulse" />}
                 </div>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">AI Optimized Summary</span>
+                <span className="text-[10px] text-slate-500 font-normal select-none">AI Auto-Summary</span>
               </label>
               <input
+                id="batch-commit-input"
                 type="text"
-                className="w-full rounded-xl border border-white/60 bg-white/60 px-4 py-2.5 text-sm font-medium text-slate-800 placeholder-slate-400 focus:border-blue-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-100 disabled:opacity-50 transition-all shadow-inner"
-                placeholder={isAnalyzing ? "AI 偵測分析中..." : "若保持空白則由 AI 自動生成批次摘要"}
+                className="w-full rounded-lg border border-slate-800 bg-slate-950/40 px-3.5 py-2.5 text-xs font-medium text-slate-100 placeholder-slate-600 focus:border-hyper-500 focus:ring-1 focus:ring-hyper-500 focus:bg-[#0A0D16] focus:outline-none transition-all shadow-inner"
+                placeholder={isAnalyzing ? "正在分析變更..." : "留空將自動產生摘要"}
                 value={commitMessage}
                 onChange={(e) => setCommitMessage(e.target.value)}
                 disabled={isProcessing || isAnalyzing}
@@ -1389,91 +1564,105 @@ export default function BatchSync() {
             <input type="file" {...({ webkitdirectory: "", directory: "" } as any)} multiple className="hidden" ref={dirInputRef} onChange={handleFileSelect} />
 
             {/* File List & Output Console container */}
-            <div className="pt-4 pb-2 grid grid-cols-1 lg:grid-cols-2 gap-5 border-t border-slate-100 flex-1 min-h-0">
+            <div className="pt-4 pb-2 grid grid-cols-1 lg:grid-cols-2 gap-5 border-t border-slate-900/40 flex-1 min-h-0">
               <div className="flex flex-col space-y-4 min-h-0">
                 <div className="flex flex-col space-y-3 shrink-0">
-                    <div className="flex items-center flex-wrap gap-3">
+                    <div className="flex items-center flex-wrap gap-3 font-sans">
                       <button
                         onClick={handleSyncRepo}
                         disabled={syncingRepo || isProcessing}
-                        className="flex items-center justify-center space-x-2 px-4 py-2 bg-slate-900 shadow-sm hover:bg-slate-800 text-white text-sm font-bold rounded-xl border border-slate-200 transition-all active:scale-95 disabled:opacity-50"
+                        className="flex items-center justify-center space-x-2 px-4 py-2 bg-slate-900 border border-slate-800 hover:border-slate-700 hover:bg-slate-850 text-slate-200 hover:text-white text-xs font-semibold rounded-lg shadow-sm transition-all active:scale-[0.98] disabled:opacity-50"
                       >
-                        {syncingRepo ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
+                        {syncingRepo ? <Loader2 className="w-4 h-4 animate-spin text-blue-400" /> : <RefreshCcw className="w-4 h-4 text-emerald-400" />}
                         <span>與 Github 同步比對未同步的檔案</span>
                       </button>
 
-                      <div className="flex items-center space-x-2 px-3 py-2 bg-amber-50 rounded-xl border border-amber-200">
-                        <label className="flex items-center space-x-2 cursor-pointer">
+                      <div className="flex items-center space-x-2 px-3.5 py-2 bg-amber-500/10 hover:bg-amber-500/15 border border-amber-500/20 text-amber-400 rounded-lg transition-colors shadow-sm">
+                        <label className="flex items-center space-x-2 cursor-pointer select-none">
                           <input
                             type="checkbox"
                             checked={useDiffFilter}
                             onChange={(e) => setUseDiffFilter(e.target.checked)}
-                            className="rounded text-amber-500 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                            className="rounded text-amber-500 focus:ring-amber-500 w-3.5 h-3.5 cursor-pointer bg-slate-950 border-slate-800"
                             disabled={isProcessing}
                           />
-                          <span className="text-xs font-bold text-amber-700">只顯示有差異/未同步檔案</span>
+                          <span className="text-xs font-semibold text-amber-300">只顯示有差異/未同步檔案</span>
                         </label>
                       </div>
 
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={isProcessing}
-                      className="flex items-center space-x-2 px-4 py-2 bg-white hover:border-slate-400 text-slate-700 text-sm font-bold rounded-xl border border-slate-200 shadow-sm transition-all active:scale-95 disabled:opacity-50"
-                    >
-                      <FilePlus className="w-4 h-4" />
-                      <span>增加個別檔案</span>
-                    </button>
+                      <button
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={isProcessing}
+                        className="flex items-center space-x-2 px-3.5 py-2 bg-slate-900 border border-slate-800 hover:border-slate-755 hover:bg-slate-850 hover:text-white text-slate-300 text-xs font-semibold rounded-lg shadow-sm transition-colors active:scale-95 disabled:opacity-50"
+                        title="瀏覽並匯入個別本機檔案"
+                      >
+                        <FilePlus className="w-3.5 h-3.5 text-blue-400" />
+                        <span>瀏覽檔案 (Browse Files)</span>
+                      </button>
 
-                    <div className="flex items-center space-x-2 px-3 py-1.5 bg-slate-50 rounded-xl border border-slate-200">
-                      <FileSearch className="w-4 h-4 text-slate-400" />
+                      <button
+                        onClick={() => dirInputRef.current?.click()}
+                        disabled={isProcessing}
+                        className="flex items-center space-x-2 px-3.5 py-2 bg-slate-900 border border-slate-800 hover:border-slate-755 hover:bg-slate-850 hover:text-white text-slate-300 text-xs font-semibold rounded-lg shadow-sm transition-colors active:scale-95 disabled:opacity-50"
+                        title="瀏覽並匯入整個本機專案目錄"
+                      >
+                        <FolderUp className="w-3.5 h-3.5 text-amber-400" />
+                        <span>選擇本機目錄 (Choose Folder)</span>
+                      </button>
+
+                    <div className="flex items-center space-x-2 px-3 py-1.5 bg-slate-950/60 border border-slate-800/80 hover:border-slate-700/80 rounded-lg transition-colors focus-within:ring-1 focus-within:ring-hyper-500/40">
+                      <FileSearch className="w-4 h-4 text-slate-500" />
                       <input
                         type="text"
                         value={filterName}
                         onChange={(e) => setFilterName(e.target.value)}
                         placeholder="搜尋路徑或檔名..."
-                        className="rounded-lg bg-transparent text-xs font-semibold text-slate-800 focus:outline-none py-0.5 w-32"
+                        aria-label="搜尋路徑或檔名"
+                        className="bg-transparent text-xs font-semibold text-slate-200 placeholder-slate-500 focus:outline-none py-0.5 w-32"
                         disabled={isProcessing}
                       />
                     </div>
 
-                    <div className="flex items-center space-x-2 px-3 py-1.5 bg-slate-50 rounded-xl border border-slate-200">
-                      <label className="flex items-center space-x-2 cursor-pointer">
+                    <div className="flex items-center space-x-2 px-3 py-1.5 bg-slate-950/60 border border-slate-800/80 hover:border-slate-700/80 rounded-lg transition-colors focus-within:ring-1 focus-within:ring-hyper-500/40">
+                      <label className="flex items-center space-x-2 cursor-pointer select-none">
                         <input
                           type="checkbox"
                           checked={useDateFilter}
                           onChange={(e) => setUseDateFilter(e.target.checked)}
-                          className="rounded text-blue-500 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                          className="rounded text-blue-500 focus:ring-blue-500 w-3.5 h-3.5 cursor-pointer bg-slate-950 border-slate-850"
                           disabled={isProcessing}
                         />
-                        <span className="text-[10px] uppercase font-extrabold text-slate-500 tracking-wider">限時:</span>
+                        <span className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">限時:</span>
                       </label>
                       <input
                         type="datetime-local"
                         value={filterDateTime}
                         onChange={(e) => setFilterDateTime(e.target.value)}
                         disabled={!useDateFilter || isProcessing}
-                        className="rounded-lg bg-transparent text-xs font-semibold text-slate-800 disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none py-0.5"
+                        aria-label="限時過濾時間"
+                        className="bg-transparent text-xs font-semibold text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none py-0.5"
                         title="只同步在此時間以後修改過的檔案"
                       />
                     </div>
 
-                    <div className="flex items-center space-x-2 px-3 py-1.5 bg-slate-50 rounded-xl border border-slate-200">
-                      <label className="flex items-center space-x-2 cursor-pointer">
+                    <div className="flex items-center space-x-2 px-3 py-1.5 bg-slate-950/60 border border-slate-800/80 hover:border-slate-700/80 rounded-lg transition-colors focus-within:ring-1 focus-within:ring-hyper-500/40 font-mono">
+                      <label className="flex items-center space-x-2 cursor-pointer select-none font-sans">
                         <input
                           type="checkbox"
                           checked={useExtFilter}
                           onChange={(e) => setUseExtFilter(e.target.checked)}
-                          className="rounded text-blue-500 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                          className="rounded text-blue-500 focus:ring-blue-500 w-3.5 h-3.5 cursor-pointer bg-slate-950 border-slate-850"
                           disabled={isProcessing}
                         />
-                        <span className="text-[10px] uppercase font-extrabold text-slate-500 tracking-wider">類型:</span>
+                        <span className="text-[10px] uppercase font-extrabold text-slate-400 tracking-wider">類型:</span>
                       </label>
                       <input
                         type="text"
                         value={filterExtension}
                         onChange={(e) => setFilterExtension(e.target.value)}
                         disabled={!useExtFilter || isProcessing}
-                        className="rounded-lg bg-transparent text-xs font-semibold text-slate-800 disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none py-0.5 w-20"
+                        aria-label="副檔名過濾器"
+                        className="bg-transparent text-xs font-semibold text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed focus:outline-none py-0.5 w-20"
                         placeholder=".js, .css"
                         title="用逗號分隔要過濾的副檔名"
                       />
@@ -1512,12 +1701,44 @@ export default function BatchSync() {
                   </div>
                 </div>
 
-                {/* File Tree View - Now flex-1 to grow */}
-                <div id="batch-file-tree" className="rounded-xl border border-slate-200 bg-slate-50/30 shadow-inner flex-1 min-h-[300px] overflow-y-auto p-2 scroll-smooth" ref={parentRef}>
+                {/* File Tree View - Now flex-1 to grow with visual keyboard hint */}
+                <div 
+                  id="batch-file-tree" 
+                  tabIndex={0}
+                  onKeyDown={handleTreeKeyDown}
+                  title="可使用箭頭鍵上下移動，空白鍵快速預覽，Enter 展開/折疊與選取"
+                  className="rounded-xl border border-slate-800/80 bg-slate-950/40 shadow-inner flex-1 min-h-[300px] overflow-y-auto p-2 scroll-smooth focus:outline-none focus:border-blue-400/80 focus:ring-1 focus:ring-blue-400/20 group" 
+                  ref={parentRef}
+                >
                   {filteredFiles.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center text-slate-400 p-6 space-y-3">
-                      <FileSearch className="w-12 h-12 opacity-30 drop-shadow-md" />
-                      <p className="text-sm font-medium">尚未選擇檔案或拖曳目標至此。</p>
+                    <div className="h-full min-h-[250px] flex flex-col items-center justify-center text-slate-500 p-6 space-y-4">
+                      <div className="relative p-3.5 bg-slate-900 border border-slate-800 rounded-full shadow-inner animate-[pulse_3s_infinite]">
+                        <FileSearch className="w-10 h-10 opacity-60 text-slate-400" />
+                      </div>
+                      <div className="text-center">
+                        <p className="text-xs font-semibold text-slate-300">本機工作區尚未掛載變更 (Workspace Empty)</p>
+                        <p className="text-[11px] text-slate-500 mt-1 max-w-[280px] leading-relaxed mx-auto">
+                          拖曳檔案與目錄至此，或點擊選擇檔案。
+                        </p>
+                      </div>
+                      <div className="flex items-center space-x-2.5 pt-1.5">
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          disabled={isProcessing}
+                          className="flex items-center space-x-1.5 px-3 py-2 bg-slate-900 hover:bg-slate-850 hover:text-white text-slate-300 text-xs font-semibold rounded-lg border border-slate-800 hover:border-slate-700 transition-all shadow-md active:scale-95 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                        >
+                          <FilePlus className="w-3.5 h-3.5 text-blue-400" />
+                          <span>選擇本機檔案</span>
+                        </button>
+                        <button
+                          onClick={() => dirInputRef.current?.click()}
+                          disabled={isProcessing}
+                          className="flex items-center space-x-1.5 px-3 py-2 bg-slate-900 hover:bg-slate-850 hover:text-white text-slate-300 text-xs font-semibold rounded-lg border border-slate-800 hover:border-slate-700 transition-all shadow-md active:scale-95 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500"
+                        >
+                          <FolderUp className="w-3.5 h-3.5 text-amber-400" />
+                          <span>彙整整個目錄</span>
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div
@@ -1535,34 +1756,24 @@ export default function BatchSync() {
 
               {/* Terminal Logs & Preview - Now flex-1 to grow */}
               <div className="flex flex-col min-h-0">
-                <div className="flex items-center justify-between mb-3 h-8 px-1 shrink-0">
+                <div className="flex items-center justify-between mb-3 h-8 px-1 shrink-0 font-sans">
                   <div className="flex items-center space-x-4">
                     <button 
                       onClick={() => setActiveTab('logs')}
-                      className={`text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'logs' ? 'text-slate-800' : 'text-slate-400 hover:text-slate-600'}`}
+                      className={`text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'logs' ? 'text-slate-200' : 'text-slate-500 hover:text-slate-400'}`}
                     >
                       System Logs
                     </button>
                     <button 
                       onClick={() => setActiveTab('preview')}
-                      className={`text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'preview' ? 'text-slate-800' : 'text-slate-400 hover:text-slate-600'}`}
+                      className={`text-xs font-black uppercase tracking-widest transition-all ${activeTab === 'preview' ? 'text-slate-200' : 'text-slate-500'}`}
                     >
                       File Preview
                     </button>
                   </div>
-                  {activeTab === 'preview' && previewContent && (
-                    <div className="flex items-center space-x-2">
-                       <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase ${
-                         previewContent.status.includes('MODIFIED') ? 'text-amber-600 bg-amber-50' : 
-                         previewContent.status.includes('SYNCED') ? 'text-emerald-600 bg-emerald-50' : 'text-sky-600 bg-sky-50'
-                       }`}>
-                         {previewContent.status}
-                       </span>
-                    </div>
-                  )}
                 </div>
 
-                <div className="rounded-xl border border-slate-800 bg-slate-900 shadow-2xl flex-1 min-h-[300px] overflow-y-auto font-mono text-xs text-slate-300 focus-within:ring-2 ring-blue-500/30 custom-scrollbar relative">
+                <div ref={logsContainerRef} className="rounded-xl border border-slate-800 bg-slate-900 shadow-2xl flex-1 min-h-[300px] overflow-y-auto font-mono text-xs text-slate-300 focus-within:ring-2 ring-blue-500/30 custom-scrollbar relative">
                   {activeTab === 'logs' ? (
                     <div className="p-5 space-y-1.5">
                       {logs.length === 0 ? (
@@ -1581,7 +1792,6 @@ export default function BatchSync() {
                           <span>Executing sequence...</span>
                         </div>
                       )}
-                      <div ref={logsEndRef} />
                     </div>
                   ) : (
                     <div className="flex flex-col h-full">
@@ -1690,7 +1900,7 @@ export default function BatchSync() {
                   <button
                     onClick={handleBatchSync}
                     disabled={isProcessing || filteredFiles.length === 0}
-                    className="flex items-center justify-center space-x-2 rounded-xl bg-slate-900 px-8 py-3.5 text-sm font-bold text-white hover:bg-slate-800 focus:outline-none focus:ring-4 focus:ring-slate-900/20 transition-all shadow-md active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center justify-center space-x-2 rounded-lg bg-[#007AFF] hover:bg-[#0062D6] py-3 px-8 text-sm font-medium text-white transition-all shadow-sm active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed h-11"
                   >
                     {isProcessing ? (
                       <Loader2 className="h-5 w-5 animate-spin" />
@@ -1735,9 +1945,17 @@ export default function BatchSync() {
                   {Math.round((progress.current / progress.total) * 100)}% ({progress.current}/{progress.total})
                 </span>
                 {!isProgressCollapsed && (
-                  <span className="text-xs font-medium text-slate-700 truncate mt-0.5">
-                    正在同步: {currentSyncingFile || '系統處理中...'}
-                  </span>
+                  <div className="flex items-center space-x-2 mt-0.5">
+                    <span className="text-xs font-medium text-slate-700 truncate max-w-[200px]">
+                      正在同步: {currentSyncingFile || '系統處理中...'}
+                    </span>
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); handleCancelBatchSync(); }}
+                      className="text-[10px] text-red-650 bg-red-100 hover:bg-red-200 border border-red-200 hover:border-red-300 font-bold px-1.5 py-0.5 rounded transition-all active:scale-95"
+                    >
+                      取消
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

@@ -177,7 +177,8 @@ export async function syncMultipleFilesViaGitDatabase(
   message: string,
   files: { path: string; content: string; isBase64: boolean }[],
   customToken?: string,
-  onProgress?: (message: string) => void
+  onProgress?: (message: string) => void,
+  isAborted?: () => boolean
 ) {
   const notify = (msg: string) => onProgress && onProgress(msg);
 
@@ -188,6 +189,11 @@ export async function syncMultipleFilesViaGitDatabase(
     let lastRes = null;
 
     for (let i = 0; i < totalFiles; i++) {
+      if (isAborted && isAborted()) {
+        notify(`[Cancel] 同步已被使用者手動取消。`);
+        throw new Error('同步處理已由使用者取消。');
+      }
+
       const file = files[i];
       notify(`[${i + 1}/${totalFiles}] 正在同步: ${file.path} ...`);
       
@@ -205,6 +211,10 @@ export async function syncMultipleFilesViaGitDatabase(
       
       // Optional: Add a tiny delay to avoid hitting abuse rate limits if there are many files
       if (i < totalFiles - 1) {
+        if (isAborted && isAborted()) {
+          notify(`[Cancel] 同步已被使用者手動取消。`);
+          throw new Error('同步處理已由使用者取消。');
+        }
         await new Promise(resolve => setTimeout(resolve, 500));
       }
     }

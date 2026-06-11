@@ -1,6 +1,8 @@
 {
   "name": "FileNexus",
-  "description": "A high-performance file system for managing and organizing your documents with ease.",
+  "description": "A refined, desktop-class visual synchronization bridge linking your local files and remote GitHub repositories.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

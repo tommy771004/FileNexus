@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { FSNode, FileSystemState } from '@/types';
+import { FSNode, FileSystemState } from '../types';
 
 const STORAGE_KEY = 'filenexus_fs_v1';
 
